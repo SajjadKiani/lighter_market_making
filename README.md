@@ -63,7 +63,7 @@ docker-compose down
 
 ### 1. Data Collection
 
-The `gather_lighter_data.py` script connects to the Lighter DEX websocket and subscribes to the order book and trade channels for the configured markets (e.g., 'ETH', 'BTC', 'PAXG'). It saves this data to CSV files in the `lighter_data` directory.
+The `gather_lighter_data.py` script connects to the Lighter DEX websocket and subscribes to the order book and trade channels for the configured markets (e.g., 'ETH', 'BTC', 'PAXG', 'ASTER'). It saves this data to CSV files in the `lighter_data` directory.
 
 ### 2. Parameter Calculation
 
