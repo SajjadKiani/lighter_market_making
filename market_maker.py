@@ -660,10 +660,12 @@ async def main():
                                     if current_mid_price:
                                         logger.info(f"🔄 Closing existing long position of size {position_size} at startup")
                                         if await close_long_position(client, position_size, current_mid_price):
-                                            global order_side, last_mid_price
+                                            # Synchronize internal state with the action taken.
+                                            global order_side, last_mid_price, current_position_size
+                                            current_position_size = position_size #<-- THE FIX
                                             order_side = "sell"
                                             last_mid_price = current_mid_price
-                                            logger.info("✅ Position closing order placed, loop will manage it.")
+                                            logger.info(f"✅ Position closing order placed. Inventory state updated to {current_position_size}.")
             except Exception as e:
                 logger.warning(f"Error during startup position closing: {e}")
 
