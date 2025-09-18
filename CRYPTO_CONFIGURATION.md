@@ -65,7 +65,7 @@ You need to change the default ticker and add a case for the new ticker in the `
     If you are using a new ticker, you will need to add a new `elif` statement with the appropriate tick size. For example, for `SOL`:
     ```python
     elif ticker == 'SOL':
-        return 0.01
+        return 0.001
     ```
 
 ### 3. `market_maker.py`
