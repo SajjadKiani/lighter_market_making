@@ -1,0 +1,99 @@
+version: '3.8'
+
+networks:
+  trading_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.48.16.0/22
+
+services:
+  # Data collection service
+  lighter-data-collector:
+    build: .
+    container_name: lighter-collector
+    restart: unless-stopped
+    networks:
+      - trading_network
+    volumes:
+      # Shared data directory for CSV files
+      - ./lighter_data:/app/lighter_data
+      # Shared logs directory
+      - ./logs:/app/logs
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: python gather_lighter_data.py
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; exit(0 if os.path.exists('/app/logs/debug.log') else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Avellaneda parameters calculator service
+  avellaneda-calculator:
+    build: .
+    container_name: avellaneda-calculator
+    restart: unless-stopped
+    networks:
+      - trading_network
+    volumes:
+      # Access to data files
+      - ./lighter_data:/app/lighter_data
+      # Shared parameters directory
+      - ./avellaneda_parameters_PAXG.json:/app/avellaneda_parameters_PAXG.json
+    environment:
+      - PYTHONUNBUFFERED=1
+      - HL_DATA_LOC=/app/lighter_data
+    command: >
+      sh -c "
+        while true; do
+          echo '📊 Calculating Avellaneda parameters...';
+          python calculate_avellaneda_parameters.py PAXG --hours 4;
+          echo '⏰ Waiting 2 hours before next calculation...';
+          sleep 7200;
+        done
+      "
+    depends_on:
+      - lighter-data-collector
+    healthcheck:
+      test: ["CMD", "test", "-f", "/app/avellaneda_parameters_PAXG.json"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 300s
+
+  # Market maker trading service
+  market_maker:
+    build: .
+    container_name: market-maker
+    restart: unless-stopped
+    networks:
+      - trading_network
+    volumes:
+      # Access to shared parameters (priority mount)
+      - ./avellaneda_parameters_PAXG.json:/app/avellaneda_parameters_PAXG.json
+      # Access to shared logs directory for debug files
+      - ./logs:/app/logs
+    working_dir: /app
+    env_file:
+      - .env
+    environment:
+      - RESTART_INTERVAL_MINUTES=5
+      - PYTHONUNBUFFERED=1
+    command: >
+      sh -c "
+        while true; do
+          echo '🚀 Starting market maker...';
+          timeout ${RESTART_INTERVAL_MINUTES:-5}m python market_maker.py || true;
+          echo '🔄 Restarting in 5 seconds...';
+          sleep 5;
+        done
+      "
+    depends_on:
+      - avellaneda-calculator
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
