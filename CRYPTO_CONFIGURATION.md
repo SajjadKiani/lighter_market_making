@@ -76,7 +76,7 @@ You need to change the `MARKET_ID` and the filename of the parameters file.
     ```python
     MARKET_ID = 48  # PAXG market
     ```
-    You need to change `48` to the `MARKET_ID` of the new cryptocurrency. You can find the `MARKET_ID` in the `markets_and_indexes.txt` file. For example, for `BTC`, the `MARKET_ID` is `1`.
+    You need to change `48` to the `MARKET_ID` of the new cryptocurrency. You can find the `MARKET_ID` in the `markets_and_indexes.txt` file. For example, for `BTC`, the `MARKET_ID` is `1`. You can check the file `markets_and_indexes.txt`.
     ```python
     MARKET_ID = 1  # BTC market
     ```
