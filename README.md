@@ -1,7 +1,7 @@
 # Lighter DEX Market Maker
 
 This project is a complete market making solution for the Lighter DEX, built in Python. It consists of three main components that work together to collect data, calculate optimal trading parameters, and execute a market making strategy.
-Works on PAXG now by default.
+Works on PAXG now by default. Check `CRYPTO_CONFIGURATION.md` to see what parts to change to switch to another market.
 
 The three core components are:
 1.  **Data Collector (`gather_lighter_data.py`)**: Connects to the Lighter DEX websocket to stream real-time order book and trade data, saving it to CSV files.
