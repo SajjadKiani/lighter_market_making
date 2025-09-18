@@ -6,6 +6,7 @@ import logging
 import traceback
 from datetime import datetime
 from collections import defaultdict
+from decimal import Decimal
 
 # It is recommended to install the lighter sdk using pip
 # pip install git+https://github.com/elliottech/lighter-python.git
@@ -181,11 +182,11 @@ async def fetch_recent_trades_periodically(order_api: lighter.OrderApi):
 
                         trade_data = {
                             'timestamp': datetime.fromtimestamp(int(trade.timestamp) / 1000).isoformat(),
-                            'price': float(trade.price),
-                            'size': float(trade.size),
+                            'price': Decimal(trade.price),
+                            'size': Decimal(trade.size),
                             'side': 'buy' if hasattr(trade, 'is_maker_ask') and trade.is_maker_ask else 'sell',
                             'trade_id': trade.trade_id,
-                            'usd_amount': float(trade.usd_amount) if hasattr(trade, 'usd_amount') else None,
+                            'usd_amount': Decimal(trade.usd_amount) if hasattr(trade, 'usd_amount') else None,
                         }
                         trade_buffers[symbol].append(trade_data)
                         new_trades_count += 1
@@ -288,10 +289,10 @@ def on_order_book_update(market_id, order_book):
             
             price_data = {
                 'timestamp': datetime.now().isoformat(),
-                'bid_price': float(best_bid['price']),
-                'bid_size': float(best_bid['size']),
-                'ask_price': float(best_ask['price']),
-                'ask_size': float(best_ask['size']),
+                'bid_price': Decimal(best_bid['price']),
+                'bid_size': Decimal(best_bid['size']),
+                'ask_price': Decimal(best_ask['price']),
+                'ask_size': Decimal(best_ask['size']),
             }
             price_buffers[symbol].append(price_data)
             stats['orderbook_updates'] += 1
