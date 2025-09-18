@@ -28,13 +28,13 @@ def parse_arguments():
 def get_tick_size(ticker):
     """Get tick size based on the ticker symbol."""
     if ticker == 'BTC':
-        return 1.0
-    elif ticker == 'ETH':
         return 0.1
-    elif ticker == 'SOL':
+    elif ticker == 'ETH':
         return 0.01
+    elif ticker == 'SOL':
+        return 0.001
     elif ticker == 'WLFI':
-        return 0.0001
+        return 0.00001
     elif ticker == 'PAXG':
         return 0.01
     else:
