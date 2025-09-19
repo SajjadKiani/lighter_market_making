@@ -16,7 +16,7 @@ Important Tips:
 - Run first, for 1-2 days, the data collector service only, by edtiting the `docker-compose.yml`  (comment out the market maker service)
 - To get your `ACCOUNT_INDEX`, you can go to\
    `https://mainnet.zklighter.elliot.ai/api/v1/accountsByL1Address?l1_address=0xcEd...` where `0xcEd...` is your L1 (EVM) wallet address (Metamask, Rabby, Ledger, ...)
-- Freshly coded, probably sone bugs, only run with small amount of funds
+- Freshly coded, probably some bugs, only run with small amount of funds
 
 ## Quick Start
 
