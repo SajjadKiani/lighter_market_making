@@ -4,6 +4,8 @@ import lighter
 import os
 import time
 import json
+import math
+from typing import Tuple, Optional
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -71,9 +73,12 @@ BASE_URL = "https://mainnet.zklighter.elliot.ai"
 API_KEY_PRIVATE_KEY = os.getenv("API_KEY_PRIVATE_KEY")
 ACCOUNT_INDEX = int(os.getenv("ACCOUNT_INDEX"))
 API_KEY_INDEX = int(os.getenv("API_KEY_INDEX"))
-MARKET_ID = 48  # PAXG market
-SPREAD = 0.035/100.0
-BASE_AMOUNT = 0.047  # Static fallback amount
+MARKET_SYMBOL = "PAXG"  # The symbol for the market
+MARKET_ID = None  # Will be fetched dynamically at startup.
+PRICE_TICK_SIZE = None  # Will be fetched dynamically at startup.
+AMOUNT_TICK_SIZE = None  # Will be fetched dynamically at startup.
+SPREAD = 0.035 / 100.0  # Fallback spread percent if Avellaneda parameters are not used.
+BASE_AMOUNT = 0.047  # Fallback order size if dynamic sizing fails.
 USE_DYNAMIC_SIZING = True
 CAPITAL_USAGE_PERCENT = 0.99
 SAFETY_MARGIN_PERCENT = 0.01
@@ -97,19 +102,35 @@ order_counter = 1000
 available_capital = None
 last_capital_check = 0
 
-# --- FIX: INVENTORY MANAGEMENT ---
-# Variables to track the size of our open position
-current_position_size = 0
-last_order_base_amount = 0
-# --- END FIX ---
+# Inventory Management
+current_position_size = 0  # Tracks the size of our current position.
+last_order_base_amount = 0 # Stores the size of the last placed order.
 
 # Avellaneda-Stoikov parameters
 avellaneda_params = None
 last_avellaneda_update = 0
-AVELLANEDA_REFRESH_INTERVAL = 60
+AVELLANEDA_REFRESH_INTERVAL = 900 # seconds
 
-# Global flag to track if we've detected a position at startup
+# Flag to confirm startup position check has completed.
 position_detected_at_startup = False
+
+
+async def get_market_details(order_api, symbol: str) -> Optional[Tuple[int, float, float]]:
+    """
+    Retrieves the market index, price tick size, and amount tick size for a given symbol.
+    """
+    try:
+        order_books_response = await order_api.order_books()
+        for order_book in order_books_response.order_books:
+            if order_book.symbol.upper() == symbol.upper():
+                market_id = order_book.market_id
+                price_tick_size = 10 ** -order_book.supported_price_decimals
+                amount_tick_size = 10 ** -order_book.supported_size_decimals
+                return market_id, price_tick_size, amount_tick_size
+        return None  # Symbol not found
+    except Exception as e:
+        logger.error(f"An error occurred while fetching market details: {e}")
+        return None
 
 
 def trim_exception(e: Exception) -> str:
@@ -118,13 +139,12 @@ def trim_exception(e: Exception) -> str:
     return result
 
 
-async def get_account_balances(api_client):
+async def get_account_balances(account_api):
     """Get account balances."""
     logger.debug("get_account_balances called")
     logger.info("Retrieving account balances...")
 
     try:
-        account_api = lighter.AccountApi(api_client)
         account = await account_api.account(by="index", value=str(ACCOUNT_INDEX))
         logger.info("Successfully retrieved account data")
 
@@ -152,12 +172,11 @@ async def get_account_balances(api_client):
         return 0
 
 
-async def check_open_positions(api_client):
+async def check_open_positions(account_api):
     """Check for open positions using the Lighter SDK."""
     logger.debug("check_open_positions called")
     logger.info("Detecting open positions using Lighter SDK AccountApi...")
     try:
-        account_api = lighter.AccountApi(api_client)
         account = await account_api.account(by="index", value=str(ACCOUNT_INDEX))
         logger.info(f"Successfully retrieved account data")
         return account
@@ -177,8 +196,8 @@ async def close_long_position(client, position_size, current_mid_price):
         tx, tx_hash, err = await client.create_order(
             market_index=MARKET_ID,
             client_order_index=order_counter,
-            base_amount=int(abs(position_size) * 10000),
-            price=int(sell_price * 100),
+            base_amount=int(abs(position_size) / AMOUNT_TICK_SIZE),
+            price=int(sell_price / PRICE_TICK_SIZE),
             is_ask=True,
             order_type=lighter.SignerClient.ORDER_TYPE_LIMIT,
             time_in_force=lighter.SignerClient.ORDER_TIME_IN_FORCE_POST_ONLY,
@@ -223,8 +242,8 @@ def on_order_book_update(market_id, order_book):
         logger.error(f"Error in order book callback: {e}", exc_info=True)
         ws_connection_healthy = False
 
-
 def on_account_update(account_id, account):
+    """Callback for account updates (not used in this strategy)."""
     pass
 
 
@@ -248,7 +267,6 @@ class RobustWsClient(lighter.WsClient):
         except Exception as e:
             logger.error(f"Error handling websocket message: {e}", exc_info=True)
 
-
 def get_current_mid_price():
     """Get current mid price from cached websocket data."""
     global current_mid_price_cached
@@ -267,13 +285,13 @@ def get_current_mid_price():
     return mid_price
 
 
-async def calculate_dynamic_base_amount(api_client, current_mid_price):
+async def calculate_dynamic_base_amount(account_api, current_mid_price):
     """Calculate base amount based on available capital."""
     global available_capital, last_capital_check
     if not USE_DYNAMIC_SIZING: return BASE_AMOUNT
     current_time = time.time()
     if available_capital is None or (current_time - last_capital_check) > 60:
-        available_capital = await get_account_balances(api_client)
+        available_capital = await get_account_balances(account_api)
         last_capital_check = current_time
         logger.info(f"Available capital: ${available_capital:.2f}")
     if available_capital <= 0:
@@ -295,57 +313,95 @@ async def calculate_dynamic_base_amount(api_client, current_mid_price):
 
 
 def load_avellaneda_parameters():
-    """Load Avellaneda-Stoikov parameters from JSON file."""
+    """Load and validate Avellaneda-Stoikov parameters from JSON file."""
     global avellaneda_params, last_avellaneda_update
     try:
         current_time = time.time()
-        if avellaneda_params is None or (current_time - last_avellaneda_update) > AVELLANEDA_REFRESH_INTERVAL:
-            possible_paths = [
-                'params/avellaneda_parameters_PAXG.json',
-                'avellaneda_parameters_PAXG.json',
-                'TRADER/avellaneda_parameters_PAXG.json'
-            ]
-
-            params_loaded = False
-            for path in possible_paths:
-                try:
-                    with open(path, 'r') as f:
-                        avellaneda_params = json.load(f)
-                    logger.debug(f"Loaded Avellaneda parameters from: {path}")
-                    params_loaded = True
-                    break
-                except FileNotFoundError:
-                    continue
-
-            if not params_loaded:
-                logger.warning("⚠️ avellaneda_parameters_PAXG.json not found in any expected location")
-                return False
-            last_avellaneda_update = current_time
-            if 'limit_orders' in avellaneda_params:
-                limit_orders = avellaneda_params['limit_orders']
-                logger.info(f"📊 Loaded Avellaneda parameters:")
-                logger.info(f"   Ask spread (delta_a): {limit_orders.get('delta_a', 'N/A')}")
-                logger.info(f"   Bid spread (delta_b): {limit_orders.get('delta_b', 'N/A')}")
+        # Return True if parameters are fresh and have been validated previously.
+        if avellaneda_params is not None and (current_time - last_avellaneda_update) < AVELLANEDA_REFRESH_INTERVAL:
             return True
-        return True
-    except Exception as e:
-        logger.error(f"❌ Error loading Avellaneda parameters: {e}")
-        return False
 
+        # Reset params to force re-validation.
+        avellaneda_params = None
+
+        possible_paths = [
+            f'params/avellaneda_parameters_{MARKET_SYMBOL}.json',
+            f'avellaneda_parameters_{MARKET_SYMBOL}.json',
+            f'TRADER/avellaneda_parameters_{MARKET_SYMBOL}.json'
+        ]
+
+        params_file_content = None
+        for path in possible_paths:
+            try:
+                with open(path, 'r') as f:
+                    params_file_content = json.load(f)
+                logger.debug(f"Loaded Avellaneda parameters from: {path}")
+                break
+            except FileNotFoundError:
+                continue
+            except json.JSONDecodeError as e:
+                logger.warning(f"⚠️ Invalid JSON in {path}: {e}. Falling back to static spread.")
+                return False
+
+        if not params_file_content:
+            logger.warning(f"⚠️ avellaneda_parameters_{MARKET_SYMBOL}.json not found. Falling back to static spread.")
+            return False
+
+        # Validate the structure and content of the parameters.
+        limit_orders = params_file_content.get('limit_orders')
+        if not isinstance(limit_orders, dict):
+            logger.warning("⚠️ 'limit_orders' key is missing or invalid in JSON. Falling back to static spread.")
+            return False
+
+        delta_a = limit_orders.get('delta_a')
+        delta_b = limit_orders.get('delta_b')
+
+        if delta_a is None or delta_b is None:
+            logger.warning("⚠️ 'delta_a' or 'delta_b' is missing in JSON. Falling back to static spread.")
+            return False
+
+        try:
+            # Ensure the delta values are valid, finite, non-negative numbers.
+            delta_a_float = float(delta_a)
+            delta_b_float = float(delta_b)
+
+            if not math.isfinite(delta_a_float) or not math.isfinite(delta_b_float):
+                logger.warning("⚠️ 'delta_a' or 'delta_b' is not a finite number (NaN or Inf). Falling back to static spread.")
+                return False
+
+            if delta_a_float < 0 or delta_b_float < 0:
+                logger.warning("⚠️ 'delta_a' and 'delta_b' must be non-negative. Falling back to static spread.")
+                return False
+        except (ValueError, TypeError):
+            logger.warning("⚠️ 'delta_a' or 'delta_b' is not a valid number. Falling back to static spread.")
+            return False
+
+        # If all checks pass, set the global parameters.
+        avellaneda_params = params_file_content
+        last_avellaneda_update = current_time
+        logger.info("📊 Successfully loaded and validated Avellaneda parameters.")
+        logger.info(f"   Ask spread (delta_a): {delta_a}")
+        logger.info(f"   Bid spread (delta_b): {delta_b}")
+        return True
+
+    except Exception as e:
+        logger.error(f"❌ Unexpected error loading Avellaneda parameters: {e}")
+        avellaneda_params = None  # Ensure fallback on unexpected error.
+        return False
 
 def calculate_order_price(mid_price, side):
     """Calculate order price using Avellaneda-Stoikov or static spread."""
+    # load_avellaneda_parameters now handles all validation.
+    # If it returns True, we can safely use the parameters.
     if load_avellaneda_parameters() and avellaneda_params:
-        try:
-            limit_orders = avellaneda_params.get('limit_orders', {})
-            if side == "buy":
-                delta_b = limit_orders.get('delta_b')
-                if delta_b is not None: return mid_price - float(delta_b)
-            else:
-                delta_a = limit_orders.get('delta_a')
-                if delta_a is not None: return mid_price + float(delta_a)
-        except (KeyError, ValueError, TypeError) as e:
-            logger.warning(f"Error using Avellaneda parameters: {e}, falling back to static spread")
+        limit_orders = avellaneda_params['limit_orders']
+        if side == "buy":
+            return mid_price - float(limit_orders['delta_b'])
+        else:  # side == "sell"
+            return mid_price + float(limit_orders['delta_a'])
+
+    # Fallback to static spread if parameters are invalid or unavailable.
+    logger.debug("Falling back to static spread calculation.")
     if side == "buy":
         return mid_price * (1.0 - SPREAD)
     else:
@@ -356,8 +412,8 @@ async def place_order(client, side, price, order_id, base_amount):
     """Place a limit order."""
     global current_order_id
     is_ask = (side == "sell")
-    base_amount_scaled = int(base_amount * 10000)
-    price_scaled = int(price * 100)
+    base_amount_scaled = int(base_amount / AMOUNT_TICK_SIZE)
+    price_scaled = int(price / PRICE_TICK_SIZE)
     logger.info(f"Placing {side} order: {base_amount:.6f} units at ${price:.2f} (ID: {order_id})")
     try:
         tx, tx_hash, err = await client.create_order(
@@ -401,10 +457,9 @@ async def cancel_order(client, order_id):
         return False
 
 
-async def check_order_filled(api_client, client, order_id):
+async def check_order_filled(order_api, client, order_id):
     """Check if an order has been filled."""
     try:
-        order_api = lighter.OrderApi(api_client)
         auth_token, err = client.create_auth_token_with_expiry()
         if err:
             logger.error(f"Failed to create auth token for order check: {err}")
@@ -431,7 +486,7 @@ async def check_order_filled(api_client, client, order_id):
         return False
 
 
-async def market_making_loop(client, api_client):
+async def market_making_loop(client, account_api, order_api):
     """Main market making loop."""
     global last_mid_price, order_side, order_counter, current_order_id, position_detected_at_startup
     global current_position_size, last_order_base_amount
@@ -470,16 +525,17 @@ async def market_making_loop(client, api_client):
             if current_order_id is None:
                 order_counter += 1
                 base_amount_to_use = 0
-
-                # --- FIX: INVENTORY-AWARE SIZING ---
+                
+                # Inventory-aware order sizing
                 if order_side == "buy":
-                    # When buying, calculate size based on available capital.
-                    base_amount_to_use = await calculate_dynamic_base_amount(api_client, current_mid_price)
+                    # For a buy order, calculate the size based on available capital.
+                    base_amount_to_use = await calculate_dynamic_base_amount(account_api, current_mid_price)
                 elif order_side == "sell":
-                    # When selling, use the size of the position we are holding.
+                    # For a sell order, the size is determined by the current position we hold.
                     if current_position_size > 0:
                         base_amount_to_use = current_position_size
                     else:
+                        # This case should ideally not be reached if logic is correct.
                         logger.warning("Logic Error: Attempted to place a sell order but have no recorded position. Skipping.")
                         await asyncio.sleep(5)
                         continue # Skip this loop iteration and re-evaluate
@@ -495,13 +551,12 @@ async def market_making_loop(client, api_client):
                     logger.warning(f"Calculated order size is zero. Cannot place order.")
                     await asyncio.sleep(5)
                     continue
-                # --- END FIX ---
 
             start_time = time.time()
             filled = False
             while time.time() - start_time < ORDER_TIMEOUT:
                 if current_order_id is not None:
-                    filled = await check_order_filled(api_client, client, current_order_id)
+                    filled = await check_order_filled(order_api, client, current_order_id)
                     if filled:
                         logger.info(f"✅ Order {current_order_id} was filled!")
                         current_order_id = None
@@ -511,14 +566,16 @@ async def market_making_loop(client, api_client):
             if filled:
                 old_side = order_side
 
-                # --- FIX: UPDATE INVENTORY ON FILL ---
+                # Update inventory after a successful order fill.
                 if old_side == "buy":
+                    # A buy order was filled, so we now have a position.
                     current_position_size = last_order_base_amount
                     logger.info(f"✅ Position opened. Current inventory size: {current_position_size}")
                 elif old_side == "sell":
+                    # A sell order was filled, closing our position.
                     current_position_size = 0
                     logger.info(f"✅ Position closed. Current inventory size is now 0.")
-                # --- END FIX ---
+
                 
                 order_side = "sell" if old_side == "buy" else "buy"
                 logger.info(f"🔄 Order filled! Switching from {old_side} to {order_side} side")
@@ -545,14 +602,14 @@ async def market_making_loop(client, api_client):
             raise
 
 
-async def track_balance(api_client):
+async def track_balance(account_api):
     """Periodically tracks and logs the account balance."""
     log_path = "logs/balance_log.txt"
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
     while True:
         try:
             if current_position_size == 0:
-                balance = await get_account_balances(api_client)
+                balance = await get_account_balances(account_api)
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 with open(log_path, "a") as f:
                     f.write(f"[{timestamp}] Available Capital: ${balance:,.2f}\n")
@@ -566,9 +623,24 @@ async def track_balance(api_client):
 
 async def main():
     """Main function."""
-    global latest_order_book, current_order_id, position_detected_at_startup
+    global latest_order_book, current_order_id, position_detected_at_startup, MARKET_ID, PRICE_TICK_SIZE, AMOUNT_TICK_SIZE
     logger.info("=== Market Maker Starting ===")
+
     api_client = lighter.ApiClient(configuration=lighter.Configuration(host=BASE_URL))
+    account_api = lighter.AccountApi(api_client)
+    order_api = lighter.OrderApi(api_client)
+
+    # Fetch market details dynamically
+    market_details = await get_market_details(order_api, MARKET_SYMBOL)
+    if not market_details:
+        logger.error(f"Could not retrieve market details for {MARKET_SYMBOL}. Exiting.")
+        return
+    MARKET_ID, PRICE_TICK_SIZE, AMOUNT_TICK_SIZE = market_details
+    logger.info(f"Successfully fetched market details for {MARKET_SYMBOL}:")
+    logger.info(f"  Market ID: {MARKET_ID}")
+    logger.info(f"  Price Tick Size: {PRICE_TICK_SIZE}")
+    logger.info(f"  Amount Tick Size: {AMOUNT_TICK_SIZE}")
+
     client = lighter.SignerClient(
         url=BASE_URL,
         private_key=API_KEY_PRIVATE_KEY,
@@ -582,30 +654,27 @@ async def main():
         await client.close()
         return
     logger.info("Client connected successfully")
-
-    # ================== FIX: CLEAN SLATE PROTOCOL ==================
-    # This is the critical fix. Before doing anything else, we cancel all
-    # existing orders for this account to prevent "ghost orders" from a
-    # previous crashed or terminated session.
-    logger.info("Ensuring a clean slate by cancelling any existing orders for this account...")
     
-    # IMPORTANT: This will cancel ALL orders for the account across ALL markets.
+    # Startup Safety Protocol: Cancel any existing orders to ensure a clean slate.
+    logger.info("Ensuring a clean slate by cancelling any existing orders for this account...")
+
+    # This cancels ALL orders for the account across ALL markets to ensure a clean state.
     try:
         tx, tx_hash, err = await client.cancel_all_orders(
-            time_in_force=client.CANCEL_ALL_TIF_IMMEDIATE, 
+            time_in_force=client.CANCEL_ALL_TIF_IMMEDIATE,
             time=0
         )
         if err is not None:
-            # This is a critical failure. We cannot proceed if we can't guarantee a clean state.
+            # A failure here is critical; we cannot proceed without a clean state.
             logger.error(f"CRITICAL: Failed to cancel existing orders at startup: {trim_exception(err)}")
             logger.error("Cannot continue safely. Exiting.")
             await api_client.close()
             await client.close()
             return
-            
+
         logger.info(f"Successfully sent cancel all orders transaction: {tx_hash.tx_hash if tx_hash else 'OK'}")
-        # Give the exchange a moment to process the cancellation
-        await asyncio.sleep(3) 
+        # Wait a moment for the exchange to process the cancellation.
+        await asyncio.sleep(3)
 
     except Exception as e:
         logger.error(f"CRITICAL: Exception during cancel all orders at startup: {e}", exc_info=True)
@@ -613,9 +682,8 @@ async def main():
         await api_client.close()
         await client.close()
         return
-    # ============================ END OF FIX ============================
 
-    account_info_response = await check_open_positions(api_client)
+    account_info_response = await check_open_positions(account_api)
     if account_info_response:
         try:
             position_found = False
@@ -647,7 +715,7 @@ async def main():
         logger.info(f"✅ Websocket connected for market {MARKET_ID}")
 
         logger.info("Re-checking positions before trading...")
-        position_info_response = await check_open_positions(api_client)
+        position_info_response = await check_open_positions(account_api)
         if position_info_response:
             try:
                 if hasattr(position_info_response, 'accounts') and position_info_response.accounts:
@@ -655,23 +723,23 @@ async def main():
                         for position in position_info_response.accounts[0].positions:
                             if hasattr(position, 'market_id') and position.market_id == MARKET_ID:
                                 position_size = float(getattr(position, 'position', 0))
-                                if position_size > 0: # Only handles closing long positions at startup
+                                if position_size > 0: # NOTE: This logic only handles closing existing LONG positions at startup.
                                     current_mid_price = get_current_mid_price()
                                     if current_mid_price:
                                         logger.info(f"🔄 Closing existing long position of size {position_size} at startup")
                                         if await close_long_position(client, position_size, current_mid_price):
-                                            # Synchronize internal state with the action taken.
+                                            # Synchronize internal state with the closing action.
                                             global order_side, last_mid_price, current_position_size
-                                            current_position_size = position_size #<-- THE FIX
+                                            current_position_size = position_size
                                             order_side = "sell"
                                             last_mid_price = current_mid_price
                                             logger.info(f"✅ Position closing order placed. Inventory state updated to {current_position_size}.")
             except Exception as e:
                 logger.warning(f"Error during startup position closing: {e}")
 
-        balance_task = asyncio.create_task(track_balance(api_client))
+        balance_task = asyncio.create_task(track_balance(account_api))
 
-        await market_making_loop(client, api_client)
+        await market_making_loop(client, account_api, order_api)
     except asyncio.TimeoutError:
         logger.error("❌ Timeout waiting for initial order book data.")
     except KeyboardInterrupt:
