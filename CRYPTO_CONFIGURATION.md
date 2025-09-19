@@ -104,7 +104,7 @@ You need to change the `MARKET_ID` and the filename of the parameters file.
     base_amount_scaled = int(base_amount * 10000)
     price_scaled = int(price * 100)
     ```
-    Not sure how the multiplciation by 10000 and 100 should be changed, maybe the multiplcation for `price_scaled` by 100 is actually a division by tick size of PAXG (0.01).
+    Not sure how the multiplciations by 10000 and 100 should be changed, maybe the multiplcation for `price_scaled` by 100 is actually a division by tick size of PAXG (0.01).
     Not sure how the multiplciation factor of 10000 for `base_amount` should be changed.
 
 ### 4. `gather_lighter_data.py`
