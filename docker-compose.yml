@@ -39,11 +39,11 @@ services:
     networks:
       - trading_network
     volumes:
-      # Lire les data en RO
+      # Read data in Read-Only mode
       - ./lighter_data:/app/lighter_data:ro
-      # Ecrire les paramètres ICI (dossier, pas un fichier)
+      # Write parameters HERE (directory, not a file)
       - ./params:/app/params
-      # Logs partagés
+      # Shared logs
       - ./logs:/app/logs
     environment:
       - PYTHONUNBUFFERED=1
@@ -76,9 +76,9 @@ services:
     networks:
       - trading_network
     volumes:
-      # Lire les paramètres depuis le dossier persistant
+      # Read parameters from the persistent directory
       - ./params:/app/params:ro
-      # Logs partagés
+      # Shared logs
       - ./logs:/app/logs
     working_dir: /app
     env_file:
@@ -88,9 +88,9 @@ services:
       - PYTHONUNBUFFERED=1
       - PARAMS_DIR=/app/params
       - LOG_DIR=/app/logs
-      # Mets à true si tu veux bloquer le MM tant qu'il n'y a pas de JSON valide
+      # Set to true if you want to block the MM until there is a valid JSON
       - REQUIRE_PARAMS=true
-      # Redémarrage programmé pour recharger les fichiers et libérer les fuites éventuelles
+      # Scheduled restart to reload files and release any potential memory leaks
       - RESTART_INTERVAL_MINUTES=5
     command: >
       sh -c "
