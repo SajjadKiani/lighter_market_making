@@ -16,12 +16,13 @@ services:
     networks:
       - trading_network
     volumes:
-      # Shared data directory for CSV files
+      # Shared data directory for CSV files (persist on host)
       - ./lighter_data:/app/lighter_data
-      # Shared logs directory
+      # Shared logs directory (persist on host)
       - ./logs:/app/logs
     environment:
       - PYTHONUNBUFFERED=1
+      - LOG_DIR=/app/logs
     command: python gather_lighter_data.py
     healthcheck:
       test: ["CMD", "python", "-c", "import os; exit(0 if os.path.exists('/app/logs/debug.log') else 1)"]
@@ -38,13 +39,17 @@ services:
     networks:
       - trading_network
     volumes:
-      # Access to data files
-      - ./lighter_data:/app/lighter_data
-      # Shared parameters directory
-      - ./avellaneda_parameters_PAXG.json:/app/avellaneda_parameters_PAXG.json
+      # Lire les data en RO
+      - ./lighter_data:/app/lighter_data:ro
+      # Ecrire les paramètres ICI (dossier, pas un fichier)
+      - ./params:/app/params
+      # Logs partagés
+      - ./logs:/app/logs
     environment:
       - PYTHONUNBUFFERED=1
       - HL_DATA_LOC=/app/lighter_data
+      - PARAMS_DIR=/app/params
+      - LOG_DIR=/app/logs
     command: >
       sh -c "
         while true; do
@@ -57,7 +62,7 @@ services:
     depends_on:
       - lighter-data-collector
     healthcheck:
-      test: ["CMD", "test", "-f", "/app/avellaneda_parameters_PAXG.json"]
+      test: ["CMD", "test", "-f", "/app/params/avellaneda_parameters_PAXG.json"]
       interval: 60s
       timeout: 10s
       retries: 3
@@ -71,23 +76,29 @@ services:
     networks:
       - trading_network
     volumes:
-      # Access to shared parameters (priority mount)
-      - ./avellaneda_parameters_PAXG.json:/app/avellaneda_parameters_PAXG.json
-      # Access to shared logs directory for debug files
+      # Lire les paramètres depuis le dossier persistant
+      - ./params:/app/params:ro
+      # Logs partagés
       - ./logs:/app/logs
     working_dir: /app
     env_file:
       - .env
     environment:
-      - RESTART_INTERVAL_MINUTES=5
+      - CLOSE_LONG_ON_STARTUP=true
       - PYTHONUNBUFFERED=1
+      - PARAMS_DIR=/app/params
+      - LOG_DIR=/app/logs
+      # Mets à true si tu veux bloquer le MM tant qu'il n'y a pas de JSON valide
+      - REQUIRE_PARAMS=true
+      # Redémarrage programmé pour recharger les fichiers et libérer les fuites éventuelles
+      - RESTART_INTERVAL_MINUTES=5
     command: >
       sh -c "
         while true; do
           echo '🚀 Starting market maker...';
           timeout ${RESTART_INTERVAL_MINUTES:-5}m python market_maker.py || true;
-          echo '🔄 Restarting in 5 seconds...';
-          sleep 5;
+          echo '🔄 Restarting in 2 seconds...';
+          sleep 2;
         done
       "
     depends_on:
