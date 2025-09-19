@@ -11,6 +11,7 @@ The three core components are:
 The entire system is orchestrated using Docker Compose, making it easy to run and manage.
 
 Important Tips:
+- Use on a dedicated account or sub-account. The bot will try to use all the funds available, and do compound interests.
 - Only use the Market Making with PAXG, many things have to be modified to run for another Crypto, including order size and price input formats
 - You don't need to have the `.env` file to run the data collector service
 - Run first, for 1-2 days, the data collector service only, by edtiting the `docker-compose.yml`  (comment out the market maker service)
