@@ -439,18 +439,18 @@ async def place_order(client, side, price, order_id, base_amount):
 
 
 async def cancel_order(client, order_id):
-    """Cancel an existing order."""
+    """Cancel all orders instead of targeting a specific order."""
     global current_order_id
-    logger.info(f"Cancelling order {order_id}")
+    logger.info(f"Cancelling all orders (was targeting order {order_id})")
     try:
-        tx, tx_hash, err = await client.cancel_order(
-            market_index=MARKET_ID,
-            order_index=order_id,
+        tx, tx_hash, err = await client.cancel_all_orders(
+            time_in_force=client.CANCEL_ALL_TIF_IMMEDIATE,
+            time=0
         )
         if err is not None:
-            logger.error(f"Error cancelling order {order_id}: {trim_exception(err)}")
+            logger.error(f"Error cancelling all orders: {trim_exception(err)}")
             return False
-        logger.info(f"Successfully cancelled order {order_id}: tx={tx_hash}")
+        logger.info(f"Successfully cancelled all orders: tx={tx_hash.tx_hash if tx_hash else 'OK'}")
         current_order_id = None
         return True
     except Exception as e:
