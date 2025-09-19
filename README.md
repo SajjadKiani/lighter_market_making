@@ -1,6 +1,7 @@
 # Lighter DEX Market Maker
 
 This project is a complete market making solution for the Lighter DEX, built in Python. It consists of three main components that work together to collect data, calculate optimal trading parameters, and execute a market making strategy.
+Works on PAXG now by default. Check `CRYPTO_CONFIGURATION.md` to see what parts to change to switch to another market.
 
 The three core components are:
 1.  **Data Collector (`gather_lighter_data.py`)**: Connects to the Lighter DEX websocket to stream real-time order book and trade data, saving it to CSV files.
@@ -9,51 +10,69 @@ The three core components are:
 
 The entire system is orchestrated using Docker Compose, making it easy to run and manage.
 
+Important Tips:
+- Use on a dedicated account or sub-account. The bot will try to use all the funds available, and do compound interests.
+- Only use the Market Making with PAXG, many things have to be modified to run for another Crypto, including order size and price input formats
+- You don't need to have the `.env` file to run the data collector service
+- Run first, for 1-2 days, the data collector service only, by edtiting the `docker-compose.yml`  (comment out the market maker service)
+- To get your `ACCOUNT_INDEX`, you can go to\
+   `https://mainnet.zklighter.elliot.ai/api/v1/accountsByL1Address?l1_address=0xcEd...` where `0xcEd...` is your L1 (EVM) wallet address (Metamask, Rabby, Ledger, ...)
+- Freshly coded, probably some bugs, only run with small amount of funds
+
 ## Quick Start
 
 ### Prerequisites
 *   Docker
 *   Docker Compose
 
-### 1. Configuration
+### Configuration
 
-Create a `.env` file in the root of the project with the following content:
+1.  **Create `.env` file:** Create a `.env` file in the root of the project. See `.env.example` for a template.
 
-```
-API_KEY_PRIVATE_KEY=<your_api_key_private_key>
-ACCOUNT_INDEX=<your_account_index>
-API_KEY_INDEX=<your_api_key_index>
-```
+    ```env
+    # Lighter Exchange Credentials
+    API_KEY_PRIVATE_KEY=<your_api_key_private_key>
+    ACCOUNT_INDEX=<your_account_index>
+    API_KEY_INDEX=<your_api_key_index>
 
-You can obtain these credentials from the Lighter exchange.
+    # Market Maker Behavior
+    MARKET_SYMBOL=PAXG
+    CLOSE_LONG_ON_STARTUP=true
+    REQUIRE_PARAMS=true
+    RESTART_INTERVAL_MINUTES=5
+    ```
 
-### 2. Running the Bot
+2.  **Environment Variables:**
+    *   `API_KEY_PRIVATE_KEY`, `ACCOUNT_INDEX`, `API_KEY_INDEX`: Your Lighter exchange credentials.
+    *   `MARKET_SYMBOL`: The market to trade on (e.g., PAXG, BTC, ETH). Defaults to `PAXG`.
+    *   `CLOSE_LONG_ON_STARTUP`: (true/false) If true, the bot will attempt to close any existing long position in the specified market on startup. Defaults to `false`.
+    *   `REQUIRE_PARAMS`: (true/false) If true, the market maker will *not* place any orders until valid Avellaneda parameters are calculated. If false, it will use a static fallback spread. Defaults to `false`.
+    *   `RESTART_INTERVAL_MINUTES`: The market maker service will automatically restart after this many minutes. This helps in reloading parameters and preventing potential memory leaks. Defaults to `5`.
+
+You can obtain the API credentials from the Lighter exchange.
+
+### Running the Bot
 
 Start all services using Docker Compose:
 ```bash
+docker-compose build
 docker-compose up -d
 ```
 
 This will start the data collector, parameter calculator, and market maker in the background.
 
-### 3. Monitoring
-
-You can monitor the logs of each service using the following commands:
-
-*   **Data Collector**: `docker-compose logs -f lighter-data-collector`
-*   **Parameter Calculator**: `docker-compose logs -f avellaneda-calculator`
-*   **Market Maker**: `docker-compose logs -f market_maker`
-
-Example output from the market maker service:
-
-![Market Maker Logs](screen.png)
-
-### 4. Stopping the Bot
+### Stopping the Bot
 
 To stop all services, run:
 ```bash
 docker-compose down
 ```
+
+## Example Output
+
+Here is an example of the market maker logs in action:
+
+![Market Maker Logs](screen.png)
 
 ## Project Structure
 
@@ -67,7 +86,7 @@ docker-compose down
 ├── requirements.txt
 ├── .env.example
 ├── lighter_data/       # CSV output data from the collector
-├── params/             # JSON output from the calculator
+├── params/             # JSON output from the parameter calculator
 └── logs/               # Log files for all services
 ```
 
@@ -75,26 +94,12 @@ docker-compose down
 
 ### 1. Data Collection
 
-The `gather_lighter_data.py` script connects to the Lighter DEX websocket and subscribes to the order book and trade channels for the configured markets (e.g., 'ETH', 'BTC', 'PAXG'). It saves this data to CSV files in the `lighter_data` directory.
+The `gather_lighter_data.py` script connects to the Lighter DEX websocket and subscribes to the order book and trade channels for the configured markets (e.g., 'ETH', 'BTC', 'PAXG', 'ASTER'). It saves this data to CSV files in the `lighter_data` directory.
 
 ### 2. Parameter Calculation
 
-The `calculate_avellaneda_parameters.py` script runs periodically (as defined in `docker-compose.yml`). It reads the data collected by the `gather_lighter_data.py` script and uses it to calculate the parameters for the Avellaneda-Stoikov market making model. The calculated parameters are saved to a JSON file inside the `params/` directory (e.g., `params/avellaneda_parameters_PAXG.json`).
+The `calculate_avellaneda_parameters.py` script is set to run every 2 hours by default (defined in `docker-compose.yml`). Each time it runs, it analyzes the last 4 hours of trade and order book data to calculate the parameters for the Avellaneda-Stoikov market making model. The calculated parameters are saved to a JSON file (e.g., `avellaneda_parameters_PAXG.json`) in the `params` directory. It needs at least 1-2 days of gathered data to work properly.
 
 ### 3. Market Making
 
 The `market_maker.py` script reads the parameters from the JSON file generated by the calculator. It then connects to the Lighter exchange and places buy and sell orders based on the calculated optimal spreads and reservation prices. It continuously monitors the market and its own orders, adjusting them as needed.
-
-## Development
-
-### Local Development
-
-If you want to run the scripts locally without Docker, you can follow these steps:
-
-1.  **Install dependencies**: `pip install -r requirements.txt`
-2.  **Run the scripts**:
-    *   `python gather_lighter_data.py`
-    *   `python calculate_avellaneda_parameters.py`
-    *   `python market_maker.py`
-
-Make sure to have a `.env` file with the required API credentials in the root of the project.
