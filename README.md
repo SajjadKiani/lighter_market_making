@@ -11,7 +11,7 @@ The three core components are:
 The entire system is orchestrated using Docker Compose, making it easy to run and manage.
 
 Important Tips:
-- Only use the Market Making with PAXG, many things have to be modified, including order size and price input formats
+- Only use the Market Making with PAXG, many things have to be modified to run for another Crypto, including order size and price input formats
 - You don't need to have the `.env` file to run the data collector service
 - Run first the data collector service in the `docker-compose.yml` for 1-2 days (comment out the market maker service)
 - Freshly coded, probably sone bugs, only run with small amount
