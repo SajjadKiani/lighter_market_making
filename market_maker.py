@@ -8,6 +8,7 @@ import math
 from typing import Tuple, Optional
 from datetime import datetime
 from dotenv import load_dotenv
+from lighter.exceptions import ApiException
 
 load_dotenv()
 
@@ -481,6 +482,13 @@ async def check_order_filled(order_api, client, order_id):
                 return False
         logger.debug(f"Order {order_id} not found in active orders - likely filled or cancelled.")
         return True
+    except ApiException as e:
+        if e.status == 429:
+            logger.warning("Too Many Requests when checking order status. Waiting 10s before retrying.")
+            await asyncio.sleep(10)
+        else:
+            logger.warning(f"API Error checking order status for {order_id}: {e}", exc_info=True)
+        return False
     except Exception as e:
         logger.warning(f"Error checking order status for {order_id}: {e}", exc_info=True)
         return False
@@ -515,7 +523,11 @@ async def market_making_loop(client, account_api, order_api):
 
             price_changed = (last_mid_price is None or abs(current_mid_price - last_mid_price) / last_mid_price > 0.001)
             order_price = calculate_order_price(current_mid_price, order_side)
-            logger.info(f"Mid: ${current_mid_price:.2f}, Target {order_side}: ${order_price:.2f}, Price changed: {price_changed}")
+            if current_mid_price > 0:
+                percentage_diff = ((order_price - current_mid_price) / current_mid_price) * 100
+            else:
+                percentage_diff = 0.0
+            logger.info(f"Mid: ${current_mid_price:.2f}, Target {order_side}: ${order_price:.2f} ({percentage_diff:+.4f}%), Price changed: {price_changed}")
 
             if current_order_id is not None and price_changed:
                 await cancel_order(client, current_order_id)
@@ -742,8 +754,8 @@ async def main():
         await market_making_loop(client, account_api, order_api)
     except asyncio.TimeoutError:
         logger.error("❌ Timeout waiting for initial order book data.")
-    except KeyboardInterrupt:
-        logger.info("=== KeyboardInterrupt received - Stopping... ===")
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        logger.info("=== Shutdown signal received - Stopping... ===")
     finally:
         logger.info("=== Market Maker Cleanup Starting ===")
         if 'balance_task' in locals() and not balance_task.done():
@@ -805,7 +817,28 @@ async def restart_websocket():
 
 
 if __name__ == "__main__":
+    import signal
+
+    async def main_with_signal_handling():
+        """Wraps the main application to handle shutdown signals gracefully."""
+        loop = asyncio.get_running_loop()
+        main_task = asyncio.create_task(main())
+
+        def shutdown_handler(sig):
+            logger.info(f"Received exit signal {sig.name}, cancelling main task.")
+            if not main_task.done():
+                main_task.cancel()
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, shutdown_handler, sig)
+
+        try:
+            await main_task
+        except asyncio.CancelledError:
+            logger.info("Main task cancelled. Cleanup is handled in main().")
+
     try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n=== Market maker stopped by user (Ctrl+C) ===")
+        asyncio.run(main_with_signal_handling())
+        logger.info("Application has finished gracefully.")
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Application exiting.")
