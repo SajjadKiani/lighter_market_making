@@ -34,9 +34,9 @@ def _finite_nonneg(x) -> bool:
 
 def save_avellaneda_params_atomic(params: Dict[str, Any], symbol: str) -> bool:
     """
-    Écrit params dans PARAMS_DIR/avellaneda_parameters_<SYMBOL>.json
-    via un fichier .tmp + os.replace (atomique) si la validation passe.
-    Retourne True si le fichier final a été mis à jour, False sinon.
+    Writes params to PARAMS_DIR/avellaneda_parameters_<SYMBOL>.json
+    via a .tmp file + os.replace (atomic) if validation passes.
+    Returns True if the final file was updated, False otherwise.
     """
     limit_orders = (params or {}).get("limit_orders") or {}
     da = limit_orders.get("delta_a")
@@ -45,15 +45,15 @@ def save_avellaneda_params_atomic(params: Dict[str, Any], symbol: str) -> bool:
     final_path = os.path.join(PARAMS_DIR, f"avellaneda_parameters_{symbol}.json")
     tmp_path = final_path + ".tmp"
 
-    # Validation stricte
+    # Strict validation
     if not (_finite_nonneg(da) and _finite_nonneg(db)):
-        # Ne PAS écraser un bon fichier avec un mauvais calcul
+        # Do NOT overwrite a good file with a bad calculation
         return False
 
     with open(tmp_path, "w") as f:
         json.dump(params, f)
 
-    # Remplacement atomique
+    # Atomic replacement
     os.replace(tmp_path, final_path)
     return True
 
