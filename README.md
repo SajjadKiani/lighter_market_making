@@ -37,9 +37,6 @@ Important Tips:
 
     # Market Maker Behavior
     MARKET_SYMBOL=PAXG
-    CLOSE_LONG_ON_STARTUP=true
-    REQUIRE_PARAMS=true
-    RESTART_INTERVAL_MINUTES=5
     ```
 
 2.  **Environment Variables:**
