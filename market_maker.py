@@ -248,7 +248,7 @@ async def calculate_dynamic_base_amount(account_api, current_mid_price):
 
 def load_avellaneda_parameters() -> bool:
     """
-    Charge et valide les paramètres Avellaneda depuis PARAMS_DIR en priorité.
+    Load and validate Avellaneda parameters from PARAMS_DIR with priority.
     """
     global avellaneda_params, last_avellaneda_update
     try:
@@ -349,7 +349,7 @@ async def place_order(client, side, price, order_id, base_amount):
 
 async def cancel_order(client, order_id):
     """
-    Remplacé par un cancel_all_orders car chaque bot tourne sur un sous-compte dédié.
+    Replaced by cancel_all_orders since each bot runs on a dedicated sub-account.
     """
     global current_order_id
     logger.info(f"Cancelling all orders (was targeting order {order_id})")
@@ -462,11 +462,11 @@ async def market_making_loop(client, account_api, order_api):
 
             order_price = calculate_order_price(current_mid_price, order_side)
             if order_price is None:
-                # REQUIRE_PARAMS true et pas de params → on attend
+                # REQUIRE_PARAMS true and no params → we wait
                 await asyncio.sleep(3)
                 continue
 
-            # Log de l'écart en %
+            # Log the spread in %
             if current_mid_price > 0:
                 pct = ((order_price - current_mid_price) / current_mid_price) * 100.0
             else:
@@ -511,7 +511,7 @@ async def market_making_loop(client, account_api, order_api):
                         logger.info(f"✅ Order {current_order_id} was filled!")
                         current_order_id = None
                         break
-                await asyncio.sleep(5)
+                await asyncio.sleep(8)
 
             if filled:
                 prev_side = order_side
@@ -635,7 +635,7 @@ async def main():
         await asyncio.wait_for(order_book_received.wait(), timeout=30.0)
         logger.info(f"✅ Websocket connected for market {MARKET_ID}")
 
-        # Fermer automatiquement un long existant au démarrage si demandé
+        # Automatically close an existing long position at startup if requested
         if CLOSE_LONG_ON_STARTUP:
             info2 = await check_open_positions(account_api)
             if info2 and hasattr(info2, 'accounts') and info2.accounts:
