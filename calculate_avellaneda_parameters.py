@@ -13,6 +13,49 @@ from pathlib import Path
 import warnings
 from numba import jit
 import json
+import lighter
+import asyncio
+from typing import Tuple, Optional
+import logging
+import math
+from typing import Dict, Any
+
+PARAMS_DIR = os.getenv("PARAMS_DIR", "params")
+os.makedirs(PARAMS_DIR, exist_ok=True)
+
+logging.getLogger('numba').setLevel(logging.WARNING)
+
+def _finite_nonneg(x) -> bool:
+    try:
+        v = float(x)
+        return math.isfinite(v) and v >= 0.0
+    except Exception:
+        return False
+
+def save_avellaneda_params_atomic(params: Dict[str, Any], symbol: str) -> bool:
+    """
+    Écrit params dans PARAMS_DIR/avellaneda_parameters_<SYMBOL>.json
+    via un fichier .tmp + os.replace (atomique) si la validation passe.
+    Retourne True si le fichier final a été mis à jour, False sinon.
+    """
+    limit_orders = (params or {}).get("limit_orders") or {}
+    da = limit_orders.get("delta_a")
+    db = limit_orders.get("delta_b")
+
+    final_path = os.path.join(PARAMS_DIR, f"avellaneda_parameters_{symbol}.json")
+    tmp_path = final_path + ".tmp"
+
+    # Validation stricte
+    if not (_finite_nonneg(da) and _finite_nonneg(db)):
+        # Ne PAS écraser un bon fichier avec un mauvais calcul
+        return False
+
+    with open(tmp_path, "w") as f:
+        json.dump(params, f)
+
+    # Remplacement atomique
+    os.replace(tmp_path, final_path)
+    return True
 
 def running_in_docker() -> bool:
     """Return True if running inside a Docker container."""
@@ -25,7 +68,7 @@ def parse_arguments():
     parser.add_argument('--hours', type=int, default=4, help='Frequency in hours to recalculate parameters (default: 4)')
     return parser.parse_args()
 
-def get_tick_size(ticker):
+def get_fallback_tick_size(ticker):
     """Get tick size based on the ticker symbol."""
     if ticker == 'BTC':
         return 0.1
@@ -37,8 +80,47 @@ def get_tick_size(ticker):
         return 0.00001
     elif ticker == 'PAXG':
         return 0.01
+    elif ticker == 'ASTER':
+        return 0.00001
     else:
         return 0.01
+
+async def _get_market_details_async(symbol: str) -> Tuple[Optional[int], float, Optional[float]]:
+    """
+    Retrieves the market index, price tick size, and amount tick size for a given symbol.
+    Falls back to a hardcoded price tick size if the API call fails.
+    """
+    api_client = None
+    try:
+        BASE_URL = "https://mainnet.zklighter.elliot.ai"
+        api_client = lighter.ApiClient(configuration=lighter.Configuration(host=BASE_URL))
+        order_api = lighter.OrderApi(api_client)
+        order_books_response = await order_api.order_books()
+
+        for order_book in order_books_response.order_books:
+            if order_book.symbol.upper() == symbol.upper():
+                market_id = order_book.market_id
+                price_tick_size = 10 ** -order_book.supported_price_decimals
+                amount_tick_size = 10 ** -order_book.supported_size_decimals
+                await api_client.close()
+                return market_id, price_tick_size, amount_tick_size
+
+        # Symbol not found
+        print(f"Warning: Market details for {symbol} not found in API response. Using fallback.")
+        price_tick_size = get_fallback_tick_size(symbol)
+        await api_client.close()
+        return None, price_tick_size, None
+
+    except Exception as e:
+        print(f"An error occurred while fetching market details: {e}")
+        print("Using fallback tick size due to API error.")
+        if api_client:
+            await api_client.close()
+        price_tick_size = get_fallback_tick_size(symbol)
+        return None, price_tick_size, None
+
+def get_market_details(symbol: str) -> Tuple[Optional[int], float, Optional[float]]:
+    return asyncio.run(_get_market_details_async(symbol))
 
 def load_trades_data(csv_path):
     """Load trades data from a CSV file."""
@@ -51,6 +133,12 @@ def load_and_resample_mid_price(csv_path):
     """Load and resample mid-price data from a CSV file."""
     df = pd.read_csv(csv_path)
     df['datetime'] = pd.to_datetime(df['timestamp'], format='mixed')
+
+    # Drop duplicate timestamps before setting the index, keeping the last entry
+    if df['datetime'].duplicated().any():
+        print("Warning: Duplicate timestamps found in price data. Keeping last entry for each.")
+        df.drop_duplicates(subset=['datetime'], keep='last', inplace=True)
+
     df = df.set_index('datetime')
 
     # Create bid and ask price columns from the new format
@@ -453,13 +541,13 @@ def print_summary(results, list_of_periods):
     print(f"   Delta Bid:             ${results['limit_orders']['delta_b']:.6f} ({results['limit_orders']['delta_b_percent']:.6f}%)")
     print(f"   Total Spread:          {(results['limit_orders']['delta_a_percent'] + results['limit_orders']['delta_b_percent']):.4f}%")
     
-    if running_in_docker():
-        json_filename = f"/app/avellaneda_parameters_{TICKER}.json"
+    ok = save_avellaneda_params_atomic(results, TICKER)
+    out_path = os.path.join(PARAMS_DIR, f"avellaneda_parameters_{TICKER}.json")
+    if ok:
+        print(f"\nResults saved to: {out_path}")
     else:
-        json_filename = f"./avellaneda_parameters_{TICKER}.json"
-    with open(json_filename, 'w') as f:
-        json.dump(results, f, indent=4)
-    print(f"\nResults saved to: {json_filename}")
+        print("\n⚠️ Invalid params (delta_a/delta_b). Keeping previous file.")
+
     print("="*80)
 
 def main():
@@ -479,13 +567,23 @@ def main():
     if ma_window > 1:
         print(f"Using a {ma_window}-period moving average for parameters.")
 
-    tick_size = get_tick_size(TICKER)
+    market_details = get_market_details(TICKER)
+    market_id, price_tick_size, amount_tick_size = market_details
+
+    if market_id is not None:
+        print(f"Successfully fetched market details for {TICKER}:")
+        print(f"  Market ID: {market_id}")
+        print(f"  Price Tick Size: {price_tick_size}")
+        print(f"  Amount Tick Size: {amount_tick_size}")
+    else:
+        print(f"Could not fetch market details online. Using fallback price tick size: {price_tick_size}")
+
+    tick_size = price_tick_size
     delta_list = np.arange(tick_size, 50.0 * tick_size, tick_size)
     
     # Load data
     script_dir = Path(__file__).parent.absolute()
     default_if_not_env = script_dir / 'lighter_data'
-    print(default_if_not_env)
     HL_DATA_DIR = os.getenv('HL_DATA_LOC', default_if_not_env)
     csv_file_path = os.path.join(HL_DATA_DIR, f'prices_{TICKER}.csv')
 
