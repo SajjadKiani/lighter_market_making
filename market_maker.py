@@ -14,6 +14,7 @@ from typing import Tuple, Optional
 from datetime import datetime
 from lighter.exceptions import ApiException
 import signal
+from collections import deque
 
 # =========================
 # Env & constants
@@ -51,6 +52,7 @@ REQUIRE_PARAMS = os.getenv("REQUIRE_PARAMS", "false").lower() == "true"
 latest_order_book = None
 order_book_received = asyncio.Event()
 account_state_received = asyncio.Event()
+account_all_received = asyncio.Event()
 ws_connection_healthy = False
 last_order_book_update = 0
 current_mid_price_cached = None
@@ -61,7 +63,6 @@ current_order_id = None
 current_order_timestamp = None
 last_mid_price = None
 order_side = "buy"
-order_counter = 1000
 available_capital = None
 portfolio_value = None
 last_capital_check = 0
@@ -70,7 +71,9 @@ last_order_base_amount = 0
 
 avellaneda_params = None
 last_avellaneda_update = 0
-position_detected_at_startup = False
+
+account_positions = {}
+recent_trades = deque(maxlen=20)
 
 # =========================
 # Logging setup
@@ -127,24 +130,18 @@ async def get_market_details(order_api, symbol: str) -> Optional[Tuple[int, floa
         logger.error(f"An error occurred while fetching market details: {e}")
         return None
 
-async def check_open_positions(account_api):
-    try:
-        return await account_api.account(by="index", value=str(ACCOUNT_INDEX))
-    except Exception as e:
-        logger.error(f"Error getting account information: {e}", exc_info=True)
-        return None
-
 async def close_long_position(client, position_size, current_mid_price):
     """Close a long position with a reduce-only limit sell order."""
-    global order_counter, current_order_id
+    global current_order_id
     logger.info(f"Attempting to close long position of size {position_size}")
-    sell_price = current_mid_price * (1.0 + SPREAD)
-    order_counter += 1
+    # Place the sell order slightly above the mid-price to ensure it's not immediately taken
+    sell_price = current_mid_price * (1.0 + SPREAD) 
+    order_id = int(time.time() * 1_000_000) % 1_000_000
     logger.info(f"Placing reduce-only sell order at {sell_price} to close long position")
     try:
         tx, tx_hash, err = await client.create_order(
             market_index=MARKET_ID,
-            client_order_index=order_counter,
+            client_order_index=order_id,
             base_amount=int(abs(position_size) / AMOUNT_TICK_SIZE),
             price=int(sell_price / PRICE_TICK_SIZE),
             is_ask=True,
@@ -156,7 +153,7 @@ async def close_long_position(client, position_size, current_mid_price):
             logger.error(f"Error placing position closing order: {trim_exception(err)}")
             return False
         logger.info(f"Successfully placed position closing order: tx={getattr(tx_hash,'tx_hash',tx_hash)}")
-        current_order_id = order_counter
+        current_order_id = order_id
         return True
     except Exception as e:
         logger.error(f"Exception in close_long_position: {e}", exc_info=True)
@@ -179,9 +176,6 @@ def on_order_book_update(market_id, order_book):
     except Exception as e:
         logger.error(f"Error in order book callback: {e}", exc_info=True)
         ws_connection_healthy = False
-
-def on_account_update(account_id, account):
-    pass
 
 class RobustWsClient(lighter.WsClient):
     def handle_unhandled_message(self, message):
@@ -243,6 +237,74 @@ async def subscribe_to_user_stats(account_id):
             await asyncio.sleep(5)
         except Exception as e:
             logger.error(f"An unexpected error occurred in user_stats socket: {e}. Reconnecting in 5 seconds...")
+            await asyncio.sleep(5)
+
+def on_account_all_update(account_id, data):
+    global account_positions, recent_trades, current_position_size
+    try:
+        if int(account_id) == ACCOUNT_INDEX:
+            # Update positions
+            new_positions = data.get("positions", {})
+            account_positions = new_positions
+            
+            market_position = new_positions.get(str(MARKET_ID))
+            new_size = 0.0
+            if market_position:
+                new_size = float(market_position.get('position', 0))
+            else:
+                # Explicitly set to zero if no position for this market exists in the update
+                new_size = 0.0
+
+            if new_size != current_position_size:
+                logger.info(f"WebSocket position update for market {MARKET_ID}: {current_position_size} -> {new_size}")
+                current_position_size = new_size
+            
+            # Update trades
+            new_trades_by_market = data.get("trades", {})
+            if new_trades_by_market:
+                all_new_trades = [trade for trades in new_trades_by_market.values() for trade in trades]
+                all_new_trades.sort(key=lambda x: x.get('timestamp', 0), reverse=True)
+                for trade in reversed(all_new_trades):
+                     if trade not in recent_trades:
+                        recent_trades.append(trade)
+                        logger.info(f"WebSocket trade update: Market {trade.get('market_id')}, Type {trade.get('type')}, Size {trade.get('size')}, Price {trade.get('price')}")
+
+            if not account_all_received.is_set():
+                account_all_received.set()
+
+    except (ValueError, TypeError) as e:
+        logger.error(f"Error processing account_all update: {e}", exc_info=True)
+
+async def subscribe_to_account_all(account_id):
+    """Connects to the websocket, subscribes to account_all, and updates global state."""
+    subscription_msg = {
+        "type": "subscribe",
+        "channel": f"account_all/{account_id}"
+    }
+    
+    while True:
+        try:
+            async with websockets.connect(WEBSOCKET_URL) as ws:
+                logger.info(f"Connected to {WEBSOCKET_URL} for account_all")
+                await ws.send(json.dumps(subscription_msg))
+                logger.info(f"Subscribed to account_all for account {account_id}")
+                
+                async for message in ws:
+                    logger.debug(f"Raw account_all message received: {message}")
+                    data = json.loads(message)
+                    msg_type = data.get("type")
+                    if msg_type in ("update/account_all", "update/account", "subscribed/account_all"):
+                        on_account_all_update(account_id, data)
+                    elif data.get("type") == "ping":
+                        logger.debug("Received application-level ping, ignoring.")
+                    else:
+                        logger.debug(f"Received unhandled message on account_all socket: {data}")
+                        
+        except websockets.exceptions.ConnectionClosed as e:
+            logger.error(f"account_all connection closed: {e}. Reconnecting in 5 seconds...")
+            await asyncio.sleep(5)
+        except Exception as e:
+            logger.error(f"An unexpected error occurred in account_all socket: {e}. Reconnecting in 5 seconds...")
             await asyncio.sleep(5)
 
 def get_current_mid_price():
@@ -329,7 +391,13 @@ def load_avellaneda_parameters() -> bool:
 
         avellaneda_params = data
         last_avellaneda_update = now
-        logger.info(f"📊 Avellaneda OK. delta_a={da} delta_b={db}")
+        mid_price = get_current_mid_price()
+        if mid_price and mid_price > 0:
+            delta_a_pct = (da / mid_price) * 100
+            delta_b_pct = (db / mid_price) * 100
+            logger.info(f"📊 Avellaneda OK. delta_a={da} (+{delta_a_pct:.4f}%) delta_b={db} (-{delta_b_pct:.4f}%)")
+        else:
+            logger.info(f"📊 Avellaneda OK. delta_a={da} delta_b={db}")
         return True
 
     except Exception as e:
@@ -398,34 +466,6 @@ async def cancel_order(client, order_id):
         logger.error(f"Exception in cancel_order: {e}", exc_info=True)
         return False
 
-async def check_order_filled(order_api, client, order_id):
-    try:
-        auth_token, err = client.create_auth_token_with_expiry()
-        if err:
-            logger.error(f"Failed to create auth token: {err}")
-            return False
-        resp = await order_api.account_active_orders(
-            account_index=ACCOUNT_INDEX,
-            market_id=MARKET_ID,
-            auth=auth_token
-        )
-        if resp is None or not hasattr(resp, 'orders') or resp.orders is None:
-            return False
-        for o in resp.orders:
-            if getattr(o, 'client_order_index', None) == order_id:
-                return False
-        return True
-    except ApiException as e:
-        if getattr(e, "status", None) == 429:
-            logger.warning("Too Many Requests when checking order status. Waiting 10s before retrying.")
-            await asyncio.sleep(10)
-        else:
-            logger.warning(f"API Error checking order status for {order_id}: {e}", exc_info=True)
-        return False
-    except Exception as e:
-        logger.warning(f"Error checking order status for {order_id}: {e}", exc_info=True)
-        return False
-
 async def check_websocket_health():
     global ws_connection_healthy, last_order_book_update, ws_task
     if (time.time() - last_order_book_update) > 30:
@@ -453,7 +493,7 @@ async def restart_websocket():
             pass
     ws_connection_healthy = False
     order_book_received.clear()
-    ws_client = RobustWsClient(order_book_ids=[MARKET_ID], account_ids=[], on_order_book_update=on_order_book_update, on_account_update=on_account_update)
+    ws_client = RobustWsClient(order_book_ids=[MARKET_ID], account_ids=[], on_order_book_update=on_order_book_update)
     ws_task = asyncio.create_task(ws_client.run_async())
     try:
         logger.info("Waiting for websocket reconnection...")
@@ -465,13 +505,10 @@ async def restart_websocket():
         return False
 
 async def market_making_loop(client, account_api, order_api):
-    global last_mid_price, order_side, order_counter, current_order_id
-    global current_position_size, last_order_base_amount, position_detected_at_startup
+    global last_mid_price, order_side, current_order_id
+    global current_position_size, last_order_base_amount
 
     logger.info("🚀 Starting Avellaneda-Stoikov market making loop...")
-    if not position_detected_at_startup:
-        logger.warning("Position detection may have failed. Please verify no open positions.")
-        await asyncio.sleep(3)
 
     while True:
         try:
@@ -509,20 +546,20 @@ async def market_making_loop(client, account_api, order_api):
                 logger.info(f"Order {current_order_id} still active - price unchanged")
 
             if current_order_id is None:
-                order_counter += 1
+                order_id = int(time.time() * 1_000_000) % 1_000_000
                 if order_side == "buy":
                     base_amt = await calculate_dynamic_base_amount(current_mid_price)
-                else:
+                else: # sell side
                     if current_position_size > 0:
                         base_amt = current_position_size
                     else:
-                        logger.info("Sell side but no inventory → skip.")
+                        logger.info("Sell side but no inventory to sell → skip.")
                         await asyncio.sleep(3)
                         continue
 
                 if base_amt > 0:
                     last_order_base_amount = base_amt
-                    ok = await place_order(client, order_side, order_price, order_counter, base_amt)
+                    ok = await place_order(client, order_side, order_price, order_id, base_amt)
                     if not ok:
                         await asyncio.sleep(5)
                         continue
@@ -532,32 +569,25 @@ async def market_making_loop(client, account_api, order_api):
                     await asyncio.sleep(3)
                     continue
 
-            start = time.time()
-            filled = False
-            while time.time() - start < ORDER_TIMEOUT:
-                if current_order_id is not None:
-                    filled = await check_order_filled(order_api, client, current_order_id)
-                    if filled:
-                        logger.info(f"✅ Order {current_order_id} was filled!")
-                        current_order_id = None
-                        break
-                await asyncio.sleep(8)
+            # This is the main logic for the "reconcile-after-timeout" strategy.
+            # We wait for a set period, then cancel the order and check our final position.
+            await asyncio.sleep(ORDER_TIMEOUT)
 
-            if filled:
-                prev_side = order_side
-                if prev_side == "buy":
-                    current_position_size = last_order_base_amount
-                    logger.info(f"✅ Position opened. Inventory size: {current_position_size}")
-                else:
-                    current_position_size = 0
-                    logger.info("✅ Position closed. Inventory size: 0")
-                order_side = "sell" if prev_side == "buy" else "buy"
-                logger.info(f"🔄 Switching from {prev_side} to {order_side} side")
-                await asyncio.sleep(3)
+            if current_order_id is not None:
+                logger.info(f"⏰ Order {current_order_id} timeout reached. Cancelling and assessing fills.")
+                await cancel_order(client, current_order_id) # This also sets current_order_id to None
+
+            # After cancelling, current_position_size (updated by the websocket) is our ground truth.
+            # Now, we decide if we need to flip the side based on our actual inventory.
+            if order_side == "buy" and current_position_size > 0:
+                logger.info(f"✅ Position opened after buy cycle. New inventory: {current_position_size}")
+                order_side = "sell"
+            elif order_side == "sell" and abs(current_position_size) < 1e-9:
+                logger.info(f"✅ Position closed after sell cycle. New inventory: 0")
+                order_side = "buy"
+                last_order_base_amount = 0 # Reset after a successful sell
             else:
-                if current_order_id is not None:
-                    logger.info(f"⏰ Order {current_order_id} not filled in {ORDER_TIMEOUT}s, cancelling.")
-                    await cancel_order(client, current_order_id)
+                logger.info(f"No fill or partial fill did not close position. Current inventory: {current_position_size}. Remaining on {order_side} side.")
 
             await asyncio.sleep(2)
 
@@ -637,35 +667,15 @@ async def main():
         await client.close()
         return
 
-    # Detect positions
-    info = await check_open_positions(account_api)
-    if info:
-        try:
-            pos_found = False
-            if hasattr(info, 'accounts') and info.accounts:
-                acc = info.accounts[0]
-                if hasattr(acc, 'positions') and acc.positions:
-                    for p in acc.positions:
-                        if getattr(p, 'market_id', None) == MARKET_ID:
-                            sz = float(getattr(p, 'position', 0))
-                            if abs(sz) > 0:
-                                logger.info(f"🔍 DETECTED POSITION in market {MARKET_ID}: {sz}")
-                                pos_found = True
-            logger.info("✅ Position detection successful" + (" - found open position(s)" if pos_found else " - no open positions found"))
-            position_detected_at_startup = True
-        except Exception as e:
-            logger.error(f"Error parsing account positions: {e}", exc_info=True)
-    else:
-        logger.warning("❌ Position detection failed.")
-
     last_order_book_update = time.time()
-    ws_client = RobustWsClient(order_book_ids=[MARKET_ID], account_ids=[], on_order_book_update=on_order_book_update, on_account_update=on_account_update)
+    ws_client = RobustWsClient(order_book_ids=[MARKET_ID], account_ids=[], on_order_book_update=on_order_book_update)
     ws_task = asyncio.create_task(ws_client.run_async())
 
     user_stats_task = asyncio.create_task(subscribe_to_user_stats(ACCOUNT_INDEX))
+    account_all_task = asyncio.create_task(subscribe_to_account_all(ACCOUNT_INDEX))
 
     try:
-        logger.info("Waiting for initial order book and account data...")
+        logger.info("Waiting for initial order book, account data, and position data...")
         await asyncio.wait_for(order_book_received.wait(), timeout=30.0)
         logger.info(f"✅ Websocket connected for market {MARKET_ID}")
         
@@ -673,34 +683,47 @@ async def main():
         await asyncio.wait_for(account_state_received.wait(), timeout=30.0)
         logger.info(f"✅ Received valid account capital: ${available_capital}; and portfolio value: ${portfolio_value}.")
 
+        logger.info("Waiting for initial position data...")
+        await asyncio.wait_for(account_all_received.wait(), timeout=30.0)
+        logger.info(f"✅ Received initial position data. Current size: {current_position_size}")
+
         # Automatically close an existing long position at startup if requested
         if CLOSE_LONG_ON_STARTUP:
-            info2 = await check_open_positions(account_api)
-            if info2 and hasattr(info2, 'accounts') and info2.accounts:
-                acc = info2.accounts[0]
-                if hasattr(acc, 'positions') and acc.positions:
-                    for p in acc.positions:
-                        if getattr(p, 'market_id', None) == MARKET_ID:
-                            sz = float(getattr(p, 'position', 0))
-                            if sz > 0:
-                                mid = get_current_mid_price()
-                                if mid:
-                                    logger.info(f"🔄 Closing existing long position of size {sz} at startup (flag ON)")
-                                    ok = await close_long_position(client, sz, mid)
-                                    if ok:
-                                        global order_side, current_position_size, last_mid_price
-                                        current_position_size = sz
-                                        order_side = "sell"
-                                        last_mid_price = mid
-                                        logger.info(f"✅ Reduce-only sell placed. Inventory set to {current_position_size}.")
-                                else:
-                                    logger.warning("No fresh mid price yet; skip auto-close this boot.")
+            if current_position_size > 0:
+                mid = get_current_mid_price()
+                if mid:
+                    logger.info(f"🔄 Closing existing long position of size {current_position_size} at startup (flag ON)")
+                    ok = await close_long_position(client, current_position_size, mid)
+                    if ok:
+                        order_side = "sell"
+                        last_mid_price = mid
+                        logger.info(f"✅ Reduce-only sell placed. Waiting for websocket to confirm position change.")
+                        
+                        # Wait for the position to close with a timeout
+                        close_confirmed = False
+                        start_time = time.time()
+                        while time.time() - start_time < 60: # 60 second timeout
+                            if abs(current_position_size) < 1e-9:
+                                logger.info("✅ Position successfully closed.")
+                                close_confirmed = True
+                                break
+                            await asyncio.sleep(1)
+                        
+                        if not close_confirmed:
+                            logger.error("❌ Timed out waiting for position to close. Exiting.")
+                            return
+
+                else:
+                    logger.warning("No fresh mid price yet; skip auto-close this boot.")
+        elif current_position_size > 0:
+            logger.info(f"Existing position of {current_position_size} detected. Starting in sell mode.")
+            order_side = "sell"
 
         balance_task = asyncio.create_task(track_balance())
         await market_making_loop(client, account_api, order_api)
 
     except asyncio.TimeoutError:
-        logger.error("❌ Timeout waiting for initial order book or account data.")
+        logger.error("❌ Timeout waiting for initial data from websockets.")
     except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("=== Shutdown signal received - Stopping... ===")
     finally:
@@ -709,6 +732,12 @@ async def main():
             user_stats_task.cancel()
             try:
                 await user_stats_task
+            except asyncio.CancelledError:
+                pass
+        if 'account_all_task' in locals() and not account_all_task.done():
+            account_all_task.cancel()
+            try:
+                await account_all_task
             except asyncio.CancelledError:
                 pass
         if 'balance_task' in locals() and not balance_task.done():
@@ -730,7 +759,7 @@ async def main():
         await api_client.close()
         logger.info("Market maker stopped.")
 
-# ============ Entrypoint with signal handling ============
+# ============ Entrypoint with signal handling ============ 
 if __name__ == "__main__":
     async def main_with_signal_handling():
         loop = asyncio.get_running_loop()
