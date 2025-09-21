@@ -170,6 +170,8 @@ def calculate_garch_volatility(mid_price_df, H, freq_str):
     for i, period_start in enumerate(list_of_periods):
         period_end = period_start + pd.Timedelta(hours=H)
         
+        # For GARCH, we want to use all data up to the current period
+        # This gives us better estimates with more historical context
         mask = mid_price_df.index <= period_end
         historical_data = mid_price_df.loc[mask]
         
@@ -184,13 +186,23 @@ def calculate_garch_volatility(mid_price_df, H, freq_str):
             continue
         
         try:
+            # Fit GARCH(1,1) model with Student's t distribution
             am = arch_model(returns, mean='Constant', vol='GARCH', p=1, q=1, dist='t')
             res = am.fit(disp='off', show_warning=False)
             
-            conditional_vol = res.conditional_volatility
-            last_vol_pct = conditional_vol.iloc[-1]
+            # Forecast variance/volatility for the next period
+            forecasts = res.forecast(horizon=1)
             
-            sigma_daily = (last_vol_pct / 100) * np.sqrt(86400)
+            # Access the conditional variance forecast for the next period
+            variance_next = forecasts.variance.iloc[-1, 0]
+            volatility_next = variance_next**0.5
+            
+            # Convert from percentage returns to decimal scale
+            volatility_decimal = volatility_next / 100
+            
+            # Scale to daily volatility
+            sigma_daily = volatility_decimal * np.sqrt(86400)
+            
             sigma_garch_list.append(sigma_daily)
             
             if i == len(list_of_periods) - 1:
