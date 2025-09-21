@@ -230,25 +230,28 @@ def calculate_garch_volatility(mid_price_df, H, freq_str):
     return sigma_garch_list
 
 def calculate_rolling_volatility(mid_price_df, H, freq_str):
-    """Calculate rolling volatility (sigma)."""
+    """Calculate rolling volatility (sigma) using a period-based window."""
     print("Calculating rolling volatility as fallback...")
     
-    num_periods = len(mid_price_df.index.floor(freq_str).unique()) -1
-    num_days_equivalent = num_periods * H / 24
+    window_periods = 6  # Default window from calculate_sigma.py
 
-    rolling_avg_per = '2D'
-    if num_days_equivalent > 2: rolling_avg_per = '3D'
-    if num_days_equivalent > 3: rolling_avg_per = '4D'
-    if num_days_equivalent > 4: rolling_avg_per = '5D'
-    if num_days_equivalent > 5: rolling_avg_per = '6D'
-    if num_days_equivalent > 7: rolling_avg_per = '7D'
-
-    std = (np.log(mid_price_df.loc[:, 'mid_price']).diff()
-           .dropna()
-           .groupby(pd.Grouper(freq=freq_str)).std()
-           .rolling(rolling_avg_per).mean())
+    log_returns = np.log(mid_price_df.loc[:, 'mid_price']).diff().dropna()
+    period_std = log_returns.groupby(pd.Grouper(freq=freq_str)).std()
     
-    sigma_list = (std * np.sqrt(60 * 60 * 24)).tolist()
+    num_periods = len(period_std)
+    
+    # Adjust window if we have fewer periods than desired
+    if num_periods < window_periods:
+        actual_window = max(2, num_periods // 2) if num_periods > 1 else 1
+    else:
+        actual_window = window_periods
+    
+    print(f"Using rolling window of {actual_window} periods ({actual_window * H} hours)")
+    
+    # Apply rolling mean for smoothing
+    smoothed_std = period_std.rolling(window=actual_window, min_periods=1).mean()
+    
+    sigma_list = (smoothed_std * np.sqrt(60 * 60 * 24)).tolist()
     sigma_list = sigma_list[:-1]
     
     if sigma_list:
