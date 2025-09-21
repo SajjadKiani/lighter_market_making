@@ -95,7 +95,11 @@ The `gather_lighter_data.py` script connects to the Lighter DEX websocket and su
 
 ### 2. Parameter Calculation
 
-The `calculate_avellaneda_parameters.py` script is set to run every 2 hours by default (defined in `docker-compose.yml`). Each time it runs, it analyzes the last 4 hours of trade and order book data to calculate the parameters for the Avellaneda-Stoikov market making model. The calculated parameters are saved to a JSON file (e.g., `avellaneda_parameters_PAXG.json`) in the `params` directory. It needs at least 1-2 days of gathered data to work properly.
+The `calculate_avellaneda_parameters.py` script is set to run every 2 hours by default (defined in `docker-compose.yml`). Each time it runs, it analyzes the last 4 hours of trade and order book data to calculate the parameters for the Avellaneda-Stoikov market making model.
+
+A key input to this model is market volatility (sigma). The script now calculates this using the **GARCH(1,1) model**, which provides a more sophisticated and responsive measure of volatility. If the GARCH model fails to produce a value, or if there are fewer than 10 historical data periods available, the script automatically **falls back to a rolling standard deviation** of log returns to ensure robustness.
+
+The calculated parameters, including the volatility and optimal spreads, are saved to a nicely formatted JSON file (e.g., `avellaneda_parameters_PAXG.json`) in the `params` directory. It needs at least 1-2 days of gathered data to work properly.
 
 ### 3. Market Making
 
