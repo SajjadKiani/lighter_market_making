@@ -84,7 +84,7 @@ services:
     env_file:
       - .env
     environment:
-      - CLOSE_LONG_ON_STARTUP=true
+      - CLOSE_LONG_ON_STARTUP=false
       - PYTHONUNBUFFERED=1
       - PARAMS_DIR=/app/params
       - LOG_DIR=/app/logs
@@ -108,3 +108,4 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
