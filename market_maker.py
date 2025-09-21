@@ -9,6 +9,7 @@ import os
 import time
 import json
 import math
+import websockets
 from typing import Tuple, Optional
 from datetime import datetime
 from lighter.exceptions import ApiException
@@ -18,6 +19,7 @@ import signal
 # Env & constants
 # =========================
 BASE_URL = "https://mainnet.zklighter.elliot.ai"
+WEBSOCKET_URL = "wss://mainnet.zklighter.elliot.ai/stream"
 API_KEY_PRIVATE_KEY = os.getenv("API_KEY_PRIVATE_KEY")
 ACCOUNT_INDEX = int(os.getenv("ACCOUNT_INDEX", "0"))
 API_KEY_INDEX = int(os.getenv("API_KEY_INDEX", "0"))
@@ -48,6 +50,7 @@ REQUIRE_PARAMS = os.getenv("REQUIRE_PARAMS", "false").lower() == "true"
 # Global WS / state
 latest_order_book = None
 order_book_received = asyncio.Event()
+account_state_received = asyncio.Event()
 ws_connection_healthy = False
 last_order_book_update = 0
 current_mid_price_cached = None
@@ -60,6 +63,7 @@ last_mid_price = None
 order_side = "buy"
 order_counter = 1000
 available_capital = None
+portfolio_value = None
 last_capital_check = 0
 current_position_size = 0
 last_order_base_amount = 0
@@ -122,26 +126,6 @@ async def get_market_details(order_api, symbol: str) -> Optional[Tuple[int, floa
     except Exception as e:
         logger.error(f"An error occurred while fetching market details: {e}")
         return None
-
-async def get_account_balances(account_api):
-    logger.info("Retrieving account balances...")
-    try:
-        account = await account_api.account(by="index", value=str(ACCOUNT_INDEX))
-        if hasattr(account, 'accounts') and account.accounts:
-            acc = account.accounts[0]
-            for name in ['available_balance', 'collateral', 'total_asset_value', 'cross_asset_value']:
-                if hasattr(acc, name):
-                    try:
-                        v = float(getattr(acc, name))
-                        if v > 0:
-                            logger.info(f"✅ Using {name} as available capital: ${v}")
-                            return v
-                    except Exception:
-                        continue
-        return 0.0
-    except Exception as e:
-        logger.error(f"Error getting account balances: {e}", exc_info=True)
-        return 0.0
 
 async def check_open_positions(account_api):
     try:
@@ -212,6 +196,55 @@ class RobustWsClient(lighter.WsClient):
         except Exception as e:
             logger.error(f"WS handle error: {e}", exc_info=True)
 
+def on_user_stats_update(account_id, stats):
+    global available_capital, portfolio_value
+    try:
+        if int(account_id) == ACCOUNT_INDEX:
+            new_available_capital = float(stats.get('available_balance', 0))
+            new_portfolio_value = float(stats.get('portfolio_value', 0))
+
+            if new_available_capital > 0 and new_portfolio_value > 0:
+                available_capital = new_available_capital
+                portfolio_value = new_portfolio_value
+                logger.info(f"Received user stats for account {account_id}: Available Capital=${available_capital}, Portfolio Value=${portfolio_value}")
+                account_state_received.set()
+            else:
+                logger.warning(f"Received user stats with invalid values: available_balance={stats.get('available_balance')}, portfolio_value={stats.get('portfolio_value')}")
+    except (ValueError, TypeError) as e:
+        logger.error(f"Error processing user stats update: {e}", exc_info=True)
+
+async def subscribe_to_user_stats(account_id):
+    """Connects to the websocket, subscribes to user_stats, and updates global state."""
+    subscription_msg = {
+        "type": "subscribe",
+        "channel": f"user_stats/{account_id}"
+    }
+    
+    while True:
+        try:
+            async with websockets.connect(WEBSOCKET_URL) as ws:
+                logger.info(f"Connected to {WEBSOCKET_URL} for user stats")
+                await ws.send(json.dumps(subscription_msg))
+                logger.info(f"Subscribed to user_stats for account {account_id}")
+                
+                async for message in ws:
+                    logger.debug(f"Raw user_stats message received: {message}")
+                    data = json.loads(message)
+                    if data.get("type") == "update/user_stats" or data.get("type") == "subscribed/user_stats":
+                        stats = data.get("stats", {})
+                        on_user_stats_update(account_id, stats)
+                    elif data.get("type") == "ping":
+                        logger.debug("Received application-level ping, ignoring.")
+                    else:
+                        logger.debug(f"Received unhandled message on user_stats socket: {data}")
+                        
+        except websockets.exceptions.ConnectionClosed as e:
+            logger.error(f"User stats connection closed: {e}. Reconnecting in 5 seconds...")
+            await asyncio.sleep(5)
+        except Exception as e:
+            logger.error(f"An unexpected error occurred in user_stats socket: {e}. Reconnecting in 5 seconds...")
+            await asyncio.sleep(5)
+
 def get_current_mid_price():
     if current_mid_price_cached is not None and (time.time() - last_order_book_update) < 10:
         return current_mid_price_cached
@@ -223,18 +256,15 @@ def get_current_mid_price():
         return None
     return (float(bids[0]['price']) + float(asks[0]['price'])) / 2
 
-async def calculate_dynamic_base_amount(account_api, current_mid_price):
-    global available_capital, last_capital_check
+async def calculate_dynamic_base_amount(current_mid_price):
+    global available_capital
     if not USE_DYNAMIC_SIZING:
         return BASE_AMOUNT
-    now = time.time()
-    if available_capital is None or (now - last_capital_check) > 60:
-        available_capital = await get_account_balances(account_api)
-        last_capital_check = now
-        logger.info(f"Available capital: ${available_capital:.2f}")
-    if available_capital <= 0:
-        logger.warning(f"No available capital, using static BASE_AMOUNT: {BASE_AMOUNT}")
+
+    if available_capital is None or available_capital <= 0:
+        logger.warning(f"No available capital from websocket, using static BASE_AMOUNT: {BASE_AMOUNT}")
         return BASE_AMOUNT
+
     usable_capital = available_capital * (1 - SAFETY_MARGIN_PERCENT)
     order_capital = usable_capital * CAPITAL_USAGE_PERCENT
     if current_mid_price and current_mid_price > 0:
@@ -481,7 +511,7 @@ async def market_making_loop(client, account_api, order_api):
             if current_order_id is None:
                 order_counter += 1
                 if order_side == "buy":
-                    base_amt = await calculate_dynamic_base_amount(account_api, current_mid_price)
+                    base_amt = await calculate_dynamic_base_amount(current_mid_price)
                 else:
                     if current_position_size > 0:
                         base_amt = current_position_size
@@ -538,22 +568,24 @@ async def market_making_loop(client, account_api, order_api):
                 ws_connection_healthy = False
             await asyncio.sleep(5)
 
-async def track_balance(account_api):
+async def track_balance():
     log_path = os.path.join(LOG_DIR, "balance_log.txt")
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
     while True:
         try:
-            if current_position_size == 0:
-                balance = await get_account_balances(account_api)
+            if current_position_size == 0 and portfolio_value is not None:
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 with open(log_path, "a") as f:
-                    f.write(f"[{timestamp}] Available Capital: ${balance:,.2f}\n")
-                logger.info(f"Balance of ${balance:,.2f} logged to {log_path}")
-            else:
+                    f.write(f"[{timestamp}] Portfolio Value: ${portfolio_value:,.2f}\n")
+                logger.info(f"Portfolio value of ${portfolio_value:,.2f} logged to {log_path}")
+            elif current_position_size != 0:
                 logger.info(f"Skipping balance logging (open position: {current_position_size})")
+            else:
+                logger.info("Skipping balance logging (portfolio value not yet received)")
         except Exception as e:
             logger.error(f"Error in track_balance: {e}", exc_info=True)
         await asyncio.sleep(300)
+
 
 async def main():
     global MARKET_ID, PRICE_TICK_SIZE, AMOUNT_TICK_SIZE
@@ -630,10 +662,16 @@ async def main():
     ws_client = RobustWsClient(order_book_ids=[MARKET_ID], account_ids=[], on_order_book_update=on_order_book_update, on_account_update=on_account_update)
     ws_task = asyncio.create_task(ws_client.run_async())
 
+    user_stats_task = asyncio.create_task(subscribe_to_user_stats(ACCOUNT_INDEX))
+
     try:
-        logger.info("Waiting for initial order book data...")
+        logger.info("Waiting for initial order book and account data...")
         await asyncio.wait_for(order_book_received.wait(), timeout=30.0)
         logger.info(f"✅ Websocket connected for market {MARKET_ID}")
+        
+        logger.info("Waiting for valid account capital...")
+        await asyncio.wait_for(account_state_received.wait(), timeout=30.0)
+        logger.info(f"✅ Received valid account capital: ${available_capital}; and portfolio value: ${portfolio_value}.")
 
         # Automatically close an existing long position at startup if requested
         if CLOSE_LONG_ON_STARTUP:
@@ -658,15 +696,21 @@ async def main():
                                 else:
                                     logger.warning("No fresh mid price yet; skip auto-close this boot.")
 
-        balance_task = asyncio.create_task(track_balance(account_api))
+        balance_task = asyncio.create_task(track_balance())
         await market_making_loop(client, account_api, order_api)
 
     except asyncio.TimeoutError:
-        logger.error("❌ Timeout waiting for initial order book data.")
+        logger.error("❌ Timeout waiting for initial order book or account data.")
     except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("=== Shutdown signal received - Stopping... ===")
     finally:
         logger.info("=== Market Maker Cleanup Starting ===")
+        if 'user_stats_task' in locals() and not user_stats_task.done():
+            user_stats_task.cancel()
+            try:
+                await user_stats_task
+            except asyncio.CancelledError:
+                pass
         if 'balance_task' in locals() and not balance_task.done():
             balance_task.cancel()
             try:
