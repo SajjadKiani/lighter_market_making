@@ -11,6 +11,7 @@ import os
 import argparse
 from pathlib import Path
 import warnings
+warnings.filterwarnings('ignore')
 from numba import jit
 import json
 import lighter
@@ -19,6 +20,7 @@ from typing import Tuple, Optional
 import logging
 import math
 from typing import Dict, Any
+from arch import arch_model
 
 PARAMS_DIR = os.getenv("PARAMS_DIR", "params")
 os.makedirs(PARAMS_DIR, exist_ok=True)
@@ -51,7 +53,7 @@ def save_avellaneda_params_atomic(params: Dict[str, Any], symbol: str) -> bool:
         return False
 
     with open(tmp_path, "w") as f:
-        json.dump(params, f)
+        json.dump(params, f, indent=4)
 
     # Atomic replacement
     os.replace(tmp_path, final_path)
@@ -151,10 +153,73 @@ def load_and_resample_mid_price(csv_path):
     merged.dropna(inplace=True)
     return merged
 
-def calculate_volatility(mid_price_df, H, freq_str):
+def calculate_garch_volatility(mid_price_df, H, freq_str):
+    """
+    Calculate volatility using GARCH(1,1) model with Student's t distribution.
+    """
+    print("Calculating GARCH(1,1) Volatility...")
+    
+    list_of_periods = mid_price_df.index.floor(freq_str).unique().tolist()[:-1]
+    
+    if len(list_of_periods) < 2:
+        print("Insufficient data for GARCH modeling.")
+        return []
+    
+    sigma_garch_list = []
+    
+    for i, period_start in enumerate(list_of_periods):
+        period_end = period_start + pd.Timedelta(hours=H)
+        
+        mask = mid_price_df.index <= period_end
+        historical_data = mid_price_df.loc[mask]
+        
+        if len(historical_data) < 100:
+            sigma_garch_list.append(np.nan)
+            continue
+        
+        returns = historical_data['mid_price'].pct_change().dropna() * 100
+        
+        if len(returns) < 100:
+            sigma_garch_list.append(np.nan)
+            continue
+        
+        try:
+            am = arch_model(returns, mean='Constant', vol='GARCH', p=1, q=1, dist='t')
+            res = am.fit(disp='off', show_warning=False)
+            
+            conditional_vol = res.conditional_volatility
+            last_vol_pct = conditional_vol.iloc[-1]
+            
+            sigma_daily = (last_vol_pct / 100) * np.sqrt(86400)
+            sigma_garch_list.append(sigma_daily)
+            
+            if i == len(list_of_periods) - 1:
+                print(f"\nGARCH Model Results for latest period:")
+                print(f"  Omega (α₀): {res.params['omega']:.6f}")
+                print(f"  Alpha (α₁): {res.params['alpha[1]']:.6f}")
+                print(f"  Beta (β₁):  {res.params['beta[1]']:.6f}")
+                print(f"  Nu (df):    {res.params['nu']:.2f}")
+                print(f"  Persistence: {res.params['alpha[1]'] + res.params['beta[1]']:.6f}")
+                
+        except Exception as e:
+            sigma_garch_list.append(np.nan)
+    
+    valid_sigmas = [s for s in sigma_garch_list if not pd.isna(s)]
+    
+    if valid_sigmas:
+        print(f"Calculated {len(valid_sigmas)} valid GARCH sigma values.")
+        print("Latest GARCH volatility values:")
+        for s in sigma_garch_list[-3:]:
+            if not pd.isna(s):
+                print(f"  - {s:.6f}")
+    else:
+        print("No valid GARCH sigma values calculated.")
+    
+    return sigma_garch_list
+
+def calculate_rolling_volatility(mid_price_df, H, freq_str):
     """Calculate rolling volatility (sigma)."""
-    print("\n" + "-"*20)
-    print("Calculating volatility (sigma)...")
+    print("Calculating rolling volatility as fallback...")
     
     num_periods = len(mid_price_df.index.floor(freq_str).unique()) -1
     num_days_equivalent = num_periods * H / 24
@@ -175,12 +240,70 @@ def calculate_volatility(mid_price_df, H, freq_str):
     sigma_list = sigma_list[:-1]
     
     if sigma_list:
-        print("Latest sigma values:")
+        print("Latest rolling sigma values:")
         for s in sigma_list[-3:]:
-            print(f"  - {s:.6f}")
+            if not pd.isna(s):
+                print(f"  - {s:.6f}")
     else:
-        print("Sigma values not available.")
+        print("Rolling sigma values not available.")
     return sigma_list
+
+def calculate_volatility(mid_price_df, H, freq_str):
+    """
+    Calculate volatility (sigma) using GARCH and falling back to rolling standard deviation for missing values.
+    """
+    print("\n" + "-"*20)
+    print("Calculating volatility (sigma)...")
+
+    num_periods = len(mid_price_df.index.floor(freq_str).unique().tolist()[:-1])
+
+    if num_periods < 10:
+        print("Fewer than 10 periods available, using rolling volatility only.")
+        final_sigma = calculate_rolling_volatility(mid_price_df, H, freq_str)
+    else:
+        # 1. Calculate GARCH volatility
+        garch_sigma = calculate_garch_volatility(mid_price_df, H, freq_str)
+
+        # 2. Calculate rolling volatility as a fallback
+        rolling_sigma = calculate_rolling_volatility(mid_price_df, H, freq_str)
+
+        # Ensure lists are of the same length
+        if len(garch_sigma) < num_periods:
+            garch_sigma.extend([np.nan] * (num_periods - len(garch_sigma)))
+        if len(rolling_sigma) < num_periods:
+            rolling_sigma.extend([np.nan] * (num_periods - len(rolling_sigma)))
+
+        garch_sigma = garch_sigma[:num_periods]
+        rolling_sigma = rolling_sigma[:num_periods]
+
+        # 3. Combine results
+        final_sigma = []
+        print("\nCombining GARCH and rolling volatility...")
+        for i, (g, r) in enumerate(zip(garch_sigma, rolling_sigma)):
+            if pd.notna(g):
+                final_sigma.append(g)
+            else:
+                if pd.notna(r):
+                    print(f"  - Period {i}: GARCH failed, using rolling value: {r:.6f}")
+                else:
+                    print(f"  - Period {i}: Both GARCH and rolling failed.")
+                final_sigma.append(r)
+    
+    # Forward fill any remaining NaNs from the start
+    final_sigma_series = pd.Series(final_sigma).ffill()
+    final_sigma = final_sigma_series.tolist()
+
+    if final_sigma and not all(pd.isna(s) for s in final_sigma):
+        print("\nFinal combined sigma values:")
+        for s in final_sigma[-3:]:
+            if pd.notna(s):
+                print(f"  - {s:.6f}")
+            else:
+                print("  - nan")
+    else:
+        print("\nCould not calculate any sigma values.")
+
+    return final_sigma
 
 def calculate_intensity_params(list_of_periods, H, buy_orders, sell_orders, deltalist, mid_price_df):
     """Calculate order arrival intensity parameters (A and k)."""
