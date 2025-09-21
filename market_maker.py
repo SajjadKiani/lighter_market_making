@@ -584,8 +584,12 @@ async def market_making_loop(client, account_api, order_api):
             # Now, we decide if we need to flip the side based on our actual inventory.
             position_value_usd = (current_position_size * current_mid_price) if current_mid_price else 0
             if order_side == "buy" and current_position_size > 0:
-                logger.info(f"✅ Position opened after buy cycle. New inventory: {current_position_size}")
-                order_side = "sell"
+                if position_value_usd >= 15.0:
+                    logger.info(f"✅ Position opened after buy cycle, value ${position_value_usd:.2f} is sufficient. Flipping to sell side. New inventory: {current_position_size}")
+                    order_side = "sell"
+                else:
+                    logger.info(f"Position opened after buy cycle, but value ${position_value_usd:.2f} is < $15. Remaining on buy side to accumulate more. Inventory: {current_position_size}")
+                    # order_side remains "buy"
             elif order_side == "sell" and abs(current_position_size) < 1e-9:
                 logger.info(f"✅ Position closed after sell cycle. New inventory: 0")
                 order_side = "buy"
