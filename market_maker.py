@@ -547,15 +547,18 @@ async def market_making_loop(client, account_api, order_api):
 
             if current_order_id is None:
                 order_id = int(time.time() * 1_000_000) % 1_000_000
+                base_amt = 0
                 if order_side == "buy":
                     base_amt = await calculate_dynamic_base_amount(current_mid_price)
-                else: # sell side
+                else:  # sell side
                     if current_position_size > 0:
-                        base_amt = current_position_size
+                        position_value_usd = current_position_size * current_mid_price
+                        if position_value_usd >= 15.0:
+                            base_amt = current_position_size
+                        else:
+                            logger.info(f"Position value ${position_value_usd:.2f} is less than $15, skipping sell order for this cycle.")
                     else:
                         logger.info("Sell side but no inventory to sell → skip.")
-                        await asyncio.sleep(3)
-                        continue
 
                 if base_amt > 0:
                     last_order_base_amount = base_amt
@@ -565,9 +568,9 @@ async def market_making_loop(client, account_api, order_api):
                         continue
                     last_mid_price = current_mid_price
                 else:
-                    logger.warning("Calculated order size is zero, skip.")
-                    await asyncio.sleep(3)
-                    continue
+                    # Only log warning for buy side, sell side already has info logs
+                    if order_side == "buy":
+                        logger.warning("Calculated order size is zero, skip.")
 
             # This is the main logic for the "reconcile-after-timeout" strategy.
             # We wait for a set period, then cancel the order and check our final position.
@@ -579,13 +582,17 @@ async def market_making_loop(client, account_api, order_api):
 
             # After cancelling, current_position_size (updated by the websocket) is our ground truth.
             # Now, we decide if we need to flip the side based on our actual inventory.
+            position_value_usd = (current_position_size * current_mid_price) if current_mid_price else 0
             if order_side == "buy" and current_position_size > 0:
                 logger.info(f"✅ Position opened after buy cycle. New inventory: {current_position_size}")
                 order_side = "sell"
             elif order_side == "sell" and abs(current_position_size) < 1e-9:
                 logger.info(f"✅ Position closed after sell cycle. New inventory: 0")
                 order_side = "buy"
-                last_order_base_amount = 0 # Reset after a successful sell
+                last_order_base_amount = 0  # Reset after a successful sell
+            elif order_side == "sell" and current_position_size > 0 and position_value_usd < 15.0:
+                logger.info(f"Position value ${position_value_usd:.2f} is too small to sell. Flipping to buy side to accumulate more.")
+                order_side = "buy"
             else:
                 logger.info(f"No fill or partial fill did not close position. Current inventory: {current_position_size}. Remaining on {order_side} side.")
 
@@ -716,8 +723,19 @@ async def main():
                 else:
                     logger.warning("No fresh mid price yet; skip auto-close this boot.")
         elif current_position_size > 0:
-            logger.info(f"Existing position of {current_position_size} detected. Starting in sell mode.")
-            order_side = "sell"
+            logger.info(f"Existing position of {current_position_size} detected. Evaluating...")
+            mid_price = get_current_mid_price()
+            if mid_price:
+                position_value_usd = current_position_size * mid_price
+                if position_value_usd < 15.0:
+                    logger.info(f"Position value ${position_value_usd:.2f} is < $15. Starting in buy mode.")
+                    order_side = "buy"
+                else:
+                    logger.info(f"Position value ${position_value_usd:.2f} is >= $15. Starting in sell mode.")
+                    order_side = "sell"
+            else:
+                logger.warning("Could not get mid price to evaluate existing position, defaulting to sell mode.")
+                order_side = "sell"
 
         balance_task = asyncio.create_task(track_balance())
         await market_making_loop(client, account_api, order_api)
