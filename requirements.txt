@@ -6,3 +6,4 @@ scipy
 numba
 python-dotenv
 arch
+matplotlib
