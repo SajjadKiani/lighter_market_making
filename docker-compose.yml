@@ -88,6 +88,8 @@ services:
       - PYTHONUNBUFFERED=1
       - PARAMS_DIR=/app/params
       - LOG_DIR=/app/logs
+      - LEVERAGE=2
+      - MARGIN_MODE=cross
       # Set to true if you want to block the MM until there is a valid JSON
       - REQUIRE_PARAMS=true
       # Scheduled restart to reload files and release any potential memory leaks
@@ -108,4 +110,3 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-
