@@ -30,6 +30,9 @@ MARKET_ID = None
 PRICE_TICK_SIZE = None
 AMOUNT_TICK_SIZE = None
 
+LEVERAGE = int(os.getenv("LEVERAGE", "1"))
+MARGIN_MODE = os.getenv("MARGIN_MODE", "cross")
+
 # Directories (mounted by docker-compose)
 CLOSE_LONG_ON_STARTUP = os.getenv("CLOSE_LONG_ON_STARTUP", "false").lower() == "true"
 PARAMS_DIR = os.getenv("PARAMS_DIR", "params")
@@ -115,6 +118,28 @@ logging.root.setLevel(logging.WARNING)
 # =========================
 def trim_exception(e: Exception) -> str:
     return str(e).strip().split("\n")[-1]
+
+async def adjust_leverage(client: lighter.SignerClient, market_id: int, leverage: int, margin_mode_str: str):
+    """
+    Adjusts the leverage for a given market.
+    """
+    margin_mode = client.CROSS_MARGIN_MODE if margin_mode_str == "cross" else client.ISOLATED_MARGIN_MODE
+    
+    logger.info(f"Attempting to set leverage to {leverage} for market {market_id} with {margin_mode_str} margin.")
+
+    try:
+        tx, response, err = await client.update_leverage(market_id, margin_mode, leverage)
+        if err:
+            logger.error(f"Error updating leverage: {err}")
+            return None, None, err
+        else:
+            logger.info("Leverage updated successfully.")
+            logger.debug(f"Transaction: {tx}")
+            logger.debug(f"Response: {response}")
+            return tx, response, None
+    except Exception as e:
+        logger.error(f"An exception occurred: {e}")
+        return None, None, e
 
 async def get_market_details(order_api, symbol: str) -> Optional[Tuple[int, float, float]]:
     try:
@@ -319,15 +344,15 @@ def get_current_mid_price():
     return (float(bids[0]['price']) + float(asks[0]['price'])) / 2
 
 async def calculate_dynamic_base_amount(current_mid_price):
-    global available_capital
+    global available_capital, LEVERAGE
     if not USE_DYNAMIC_SIZING:
-        return BASE_AMOUNT
+        return BASE_AMOUNT * float(LEVERAGE)
 
     if available_capital is None or available_capital <= 0:
         logger.warning(f"No available capital from websocket, using static BASE_AMOUNT: {BASE_AMOUNT}")
-        return BASE_AMOUNT
+        return BASE_AMOUNT * float(LEVERAGE)
 
-    usable_capital = available_capital * (1 - SAFETY_MARGIN_PERCENT)
+    usable_capital = available_capital * (1.0 - SAFETY_MARGIN_PERCENT) * float(LEVERAGE)
     order_capital = usable_capital * CAPITAL_USAGE_PERCENT
     if current_mid_price and current_mid_price > 0:
         dynamic = order_capital / current_mid_price
@@ -336,7 +361,7 @@ async def calculate_dynamic_base_amount(current_mid_price):
         return dynamic
     else:
         logger.warning(f"Invalid mid price, using static BASE_AMOUNT: {BASE_AMOUNT}")
-        return BASE_AMOUNT
+        return BASE_AMOUNT * float(LEVERAGE)
 
 def load_avellaneda_parameters() -> bool:
     """
@@ -697,6 +722,21 @@ async def main():
         logger.info("Waiting for initial position data...")
         await asyncio.wait_for(account_all_received.wait(), timeout=30.0)
         logger.info(f"✅ Received initial position data. Current size: {current_position_size}")
+
+        # Adjust leverage at startup if no position is open
+        mid_price = get_current_mid_price()
+        if current_position_size*mid_price <= 15.0 and current_order_id is None:
+            if LEVERAGE > 1:
+                logger.info(f"Attempting to set leverage to {LEVERAGE}x with {MARGIN_MODE} margin...")
+                _, _, err = await adjust_leverage(client, MARKET_ID, LEVERAGE, MARGIN_MODE)
+                if err:
+                    logger.error(f"Failed to adjust leverage. Please check permissions or API key capabilities. Error: {err}")
+                    # Depending on the strategy, you might want to exit here.
+                    # For now, we will just log the error and continue with default leverage.
+                else:
+                    logger.info(f"Successfully set leverage to {LEVERAGE}x")
+            else:
+                logger.info("Leverage is set to 1, no adjustment needed.")
 
         # Automatically close an existing long position at startup if requested
         if CLOSE_LONG_ON_STARTUP:
