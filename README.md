@@ -2,6 +2,7 @@
 
 This project is a complete market making solution for the Lighter DEX, built in Python. It consists of three main components that work together to collect data, calculate optimal trading parameters, and execute a market making strategy.
 Works on PAXG now by default. Check `CRYPTO_CONFIGURATION.md` to see what parts to change to switch to another market.
+By default, it tries to use all the funds available in the account. It can use leverage (2 by default; for exmaple, if you account has 100$, it will try to put leverage at 2 and open position of size 200$). 
 
 The three core components are:
 1.  **Data Collector (`gather_lighter_data.py`)**: Connects to the Lighter DEX websocket to stream real-time order book and trade data, saving it to CSV files.
@@ -12,7 +13,7 @@ The entire system is orchestrated using Docker Compose, making it easy to run an
 
 Important Tips:
 - Use on a dedicated account or sub-account. The bot will try to use all the funds available, and do compound interests.
-- Only tested with PAXG. Not sure how well it will work for other markets, and several parts have to be changed to switch to another market (see `CRYPTO_CONFIGURATION.md`)
+- Only use the Market Making with PAXG, many things have to be modified to run for another Crypto, including order size and price input formats
 - You don't need to have the `.env` file to run the data collector service
 - Run first, for 1-2 days, the data collector service only, by edtiting the `docker-compose.yml`  (comment out the market maker service)
 - To get your `ACCOUNT_INDEX`, you can go to\
@@ -45,6 +46,8 @@ Important Tips:
     *   `CLOSE_LONG_ON_STARTUP`: (true/false) If true, the bot will attempt to close any existing long position in the specified market on startup. Defaults to `false`.
     *   `REQUIRE_PARAMS`: (true/false) If true, the market maker will *not* place any orders until valid Avellaneda parameters are calculated. If false, it will use a static fallback spread. Defaults to `false`.
     *   `RESTART_INTERVAL_MINUTES`: The market maker service will automatically restart after this many minutes. This helps in reloading parameters and preventing potential memory leaks. Defaults to `5`.
+    *   `LEVERAGE`: The amount of leverage to use (e.g., 1, 2, 5, 8). This value multiplies your available capital, allowing for larger position sizes. It can be configured in the `docker-compose.yml` file. Defaults to `2` (`1` means no leverage).
+    *   `MARGIN_MODE`: The margin mode to use, either `cross` or `isolated`. This is also configured in `docker-compose.yml`. Defaults to `cross`.
 
 You can obtain the API credentials from the Lighter exchange.
 
