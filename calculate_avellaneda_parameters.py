@@ -11,7 +11,7 @@ import os
 import argparse
 from pathlib import Path
 import warnings
-warnings.filterwarnings('ignore')
+# warnings.filterwarnings('ignore')
 from numba import jit
 import json
 import lighter
@@ -178,8 +178,10 @@ def calculate_garch_volatility(mid_price_df, H, freq_str):
         if len(historical_data) < 100:
             sigma_garch_list.append(np.nan)
             continue
+
+        scale_fact = 1000.0 # scale factor to avoid warnings.
         
-        returns = historical_data['mid_price'].pct_change().dropna() * 100
+        returns = historical_data['mid_price'].pct_change().dropna() * 100.0 * scale_fact
         
         if len(returns) < 100:
             sigma_garch_list.append(np.nan)
@@ -198,10 +200,10 @@ def calculate_garch_volatility(mid_price_df, H, freq_str):
             volatility_next = variance_next**0.5
             
             # Convert from percentage returns to decimal scale
-            volatility_decimal = volatility_next / 100
+            volatility_decimal = volatility_next / 100.0 / scale_fact
             
             # Scale to daily volatility
-            sigma_daily = volatility_decimal * np.sqrt(86400)
+            sigma_daily = volatility_decimal * np.sqrt(86400/24*H)
             
             sigma_garch_list.append(sigma_daily)
             
@@ -251,7 +253,7 @@ def calculate_rolling_volatility(mid_price_df, H, freq_str):
     # Apply rolling mean for smoothing
     smoothed_std = period_std.rolling(window=actual_window, min_periods=1).mean()
     
-    sigma_list = (smoothed_std * np.sqrt(60 * 60 * 24)).tolist()
+    sigma_list = (smoothed_std * np.sqrt(86400/24*H)).tolist()
     sigma_list = sigma_list[:-1]
     
     if sigma_list:
