@@ -224,8 +224,8 @@ async def perform_grid_search(symbol, interval):
     Performs a grid search to find the best Supertrend parameters using Lighter exchange data.
     """
     # --- Parameter Grid ---
-    atr_periods = range(20, 1001, 20)
-    atr_multipliers = np.arange(1.8, 8.4, 0.3)
+    atr_periods = range(10, 1001, 15)
+    atr_multipliers = np.arange(1.8, 8.4, 0.2)
 
     # --- Fetch Data ---
     limit = 1000 
