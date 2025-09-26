@@ -1,1 +1,34 @@
-{"ticker": "PAXG", "timestamp": "2025-09-19T20:34:20.156173", "market_data": {"mid_price": 3690.285, "sigma": 0.013928398946670343, "A": 0.05556965752531784, "k": 0.11322755263342112}, "optimal_parameters": {"gamma": 1.9170433333333332}, "current_state": {"time_remaining": 0.5, "inventory": 1, "hours_window": 4, "ma_window": 3}, "calculated_values": {"reservation_price": 3690.2848140465117, "gap": 0.00018595348819872015, "spread_base": 3.0116201973900782, "half_spread": 1.5058100986950391}, "limit_orders": {"ask_price": 3691.7904381917183, "bid_price": 3688.7788179943286, "delta_a": 1.5056241452068404, "delta_b": 1.5059960521832378, "delta_a_percent": 0.04079967116921431, "delta_b_percent": 0.040809749170680254}}
+{
+    "ticker": "PAXG",
+    "timestamp": "2025-09-26T06:50:41.883626",
+    "market_data": {
+        "mid_price": 3751.7200000000003,
+        "sigma": 0.0010007943091604674,
+        "A": 0.07295880837894253,
+        "k": 0.35344784582396055
+    },
+    "optimal_parameters": {
+        "gamma": 1.7131166666666668
+    },
+    "current_state": {
+        "time_remaining": 0.5,
+        "inventory": 1,
+        "minutes_window": 10,
+        "hours_window": 0.16666666666666666,
+        "ma_window": 3
+    },
+    "calculated_values": {
+        "reservation_price": 3751.7199991420807,
+        "gap": 8.579195309721399e-07,
+        "spread_base": 2.0616315082748855,
+        "half_spread": 1.0308157541374428
+    },
+    "limit_orders": {
+        "ask_price": 3752.750814038299,
+        "bid_price": 3750.6891825300236,
+        "delta_a": 1.0308148962179118,
+        "delta_b": 1.0308166120569737,
+        "delta_a_percent": 0.027475795001170443,
+        "delta_b_percent": 0.02747584073590176
+    }
+}
