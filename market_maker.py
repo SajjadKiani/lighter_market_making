@@ -15,6 +15,7 @@ from datetime import datetime
 from lighter.exceptions import ApiException
 import signal
 from collections import deque
+import argparse
 
 # =========================
 # Env & constants
@@ -32,9 +33,13 @@ AMOUNT_TICK_SIZE = None
 
 LEVERAGE = int(os.getenv("LEVERAGE", "1"))
 MARGIN_MODE = os.getenv("MARGIN_MODE", "cross")
+FLIP_DEFAULT = os.getenv("FLIP", "false").lower() == "true"
+flip_state = FLIP_DEFAULT
+flip_target_state = flip_state
+SUPER_TREND_REFRESH_SECONDS = 120
+POSITION_VALUE_THRESHOLD_USD = 15.0
 
 # Directories (mounted by docker-compose)
-CLOSE_LONG_ON_STARTUP = os.getenv("CLOSE_LONG_ON_STARTUP", "false").lower() == "true"
 PARAMS_DIR = os.getenv("PARAMS_DIR", "params")
 LOG_DIR = os.getenv("LOG_DIR", "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -43,9 +48,9 @@ os.makedirs(LOG_DIR, exist_ok=True)
 SPREAD = 0.035 / 100.0       # static fallback spread (if allowed)
 BASE_AMOUNT = 0.047          # static fallback amount
 USE_DYNAMIC_SIZING = True
-CAPITAL_USAGE_PERCENT = 0.99
+CAPITAL_USAGE_PERCENT = 0.25
 SAFETY_MARGIN_PERCENT = 0.01
-ORDER_TIMEOUT = 90           # seconds
+ORDER_TIMEOUT = 15           # seconds
 
 # Avellaneda
 AVELLANEDA_REFRESH_INTERVAL = 900  # seconds
@@ -65,7 +70,7 @@ ws_task = None
 current_order_id = None
 current_order_timestamp = None
 last_mid_price = None
-order_side = "buy"
+order_side = "sell" if flip_state else "buy"
 available_capital = None
 portfolio_value = None
 last_capital_check = 0
@@ -77,6 +82,8 @@ last_avellaneda_update = 0
 
 account_positions = {}
 recent_trades = deque(maxlen=20)
+supertrend_issue_logged = False
+flip_change_block_logged = False
 
 # =========================
 # Logging setup
@@ -119,6 +126,174 @@ logging.root.setLevel(logging.WARNING)
 def trim_exception(e: Exception) -> str:
     return str(e).strip().split("\n")[-1]
 
+
+def get_opening_side() -> str:
+    return "sell" if flip_state else "buy"
+
+
+def get_closing_side() -> str:
+    return "buy" if flip_state else "sell"
+
+
+def mode_label(state: Optional[bool] = None) -> str:
+    value = flip_state if state is None else state
+    return "short" if value else "long"
+
+
+def has_position_to_close(position_size: float) -> bool:
+    mid_price = get_current_mid_price()
+    if not is_position_significant(position_size, mid_price):
+        return False
+    return position_size > 0 if not flip_state else position_size < 0
+
+
+def get_closable_units(position_size: float) -> float:
+    return abs(position_size) if has_position_to_close(position_size) else 0.0
+
+
+def get_position_value_usd(position_size: float, mid_price: Optional[float]) -> float:
+    if not mid_price:
+        return 0.0
+    return abs(position_size) * mid_price
+
+
+def position_label(position_size: float) -> str:
+    if position_size > 0:
+        return "long"
+    if position_size < 0:
+        return "short"
+    return "flat"
+
+
+def get_best_prices() -> Tuple[Optional[float], Optional[float]]:
+    if latest_order_book:
+        bids = latest_order_book.get('bids', [])
+        asks = latest_order_book.get('asks', [])
+        best_bid = float(bids[0]['price']) if bids else None
+        best_ask = float(asks[0]['price']) if asks else None
+        return best_bid, best_ask
+    return None, None
+
+
+def is_position_significant(position_size: float, mid_price: Optional[float]) -> bool:
+    if abs(position_size) < 1e-9:
+        return False
+    if not mid_price or mid_price <= 0:
+        return True
+    return get_position_value_usd(position_size, mid_price) >= POSITION_VALUE_THRESHOLD_USD
+
+
+def read_supertrend_trend() -> Optional[int]:
+    candidates = [
+        os.path.join(PARAMS_DIR, f"supertrend_params_{MARKET_SYMBOL}.json"),
+        f"params/supertrend_params_{MARKET_SYMBOL}.json",
+        f"supertrend_params_{MARKET_SYMBOL}.json",
+    ]
+
+    for path in candidates:
+        try:
+            with open(path, "r") as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            continue
+        except json.JSONDecodeError as exc:
+            logger.warning(f"Invalid JSON in {path}: {exc}")
+            return None
+        except Exception as exc:
+            logger.error(f"Unexpected error reading {path}: {exc}", exc_info=True)
+            return None
+
+        trend_value = data.get("trend")
+        if isinstance(trend_value, str):
+            try:
+                trend_value = float(trend_value)
+            except ValueError:
+                logger.warning(f"Non-numeric trend value in {path}: {trend_value}")
+                return None
+        if isinstance(trend_value, (int, float)):
+            if trend_value > 0:
+                return 1
+            if trend_value < 0:
+                return -1
+            logger.info(f"Trend value 0 encountered in {path}; retaining current orientation.")
+            return None
+
+        logger.warning(f"Trend entry missing or invalid in {path}.")
+        return None
+
+    return None
+
+
+def update_flip_target_from_supertrend(initial: bool = False) -> None:
+    global flip_target_state, supertrend_issue_logged
+
+    trend = read_supertrend_trend()
+    if trend is None:
+        desired_state = False
+        if flip_target_state != desired_state:
+            logger.info(
+                f"🧭 Supertrend file missing or invalid → defaulting to {mode_label(desired_state)} mode."
+            )
+        flip_target_state = desired_state
+        if initial or not supertrend_issue_logged:
+            logger.warning(
+                f"Supertrend parameters not available for {MARKET_SYMBOL}; defaulting to long mode until file appears."
+            )
+            supertrend_issue_logged = True
+        return
+
+    supertrend_issue_logged = False
+    target_state = (trend == -1)
+    if flip_target_state != target_state or initial:
+        logger.info(
+            f"🧭 Supertrend trend {trend:+d} detected → targeting {mode_label(target_state)} mode."
+        )
+    flip_target_state = target_state
+
+
+def apply_flip_target_if_idle(force: bool = False) -> bool:
+    global flip_state, order_side, last_order_base_amount, flip_change_block_logged
+
+    if not force and flip_state == flip_target_state:
+        flip_change_block_logged = False
+        return False
+
+    if not force:
+        block_reason = None
+        mid_price = get_current_mid_price()
+        if is_position_significant(current_position_size, mid_price):
+            block_reason = (
+                f"open {position_label(current_position_size)} position of {current_position_size}"
+            )
+        elif current_order_id is not None:
+            block_reason = f"active order {current_order_id}"
+
+        if block_reason:
+            if not flip_change_block_logged:
+                logger.info(
+                    f"Supertrend requests {mode_label(flip_target_state)} mode, but {block_reason} persists. Will retry after flattening."
+                )
+                flip_change_block_logged = True
+            return False
+
+    previous_mode = mode_label(flip_state)
+    flip_state = flip_target_state
+    order_side = get_opening_side()
+    last_order_base_amount = 0
+    flip_change_block_logged = False
+    logger.info(f"Orientation updated: {previous_mode} → {mode_label()} mode.")
+    return True
+
+
+async def monitor_supertrend_params():
+    while True:
+        try:
+            update_flip_target_from_supertrend()
+            apply_flip_target_if_idle()
+        except Exception as exc:
+            logger.error(f"Supertrend monitor error: {exc}", exc_info=True)
+        await asyncio.sleep(SUPER_TREND_REFRESH_SECONDS)
+
 async def adjust_leverage(client: lighter.SignerClient, market_id: int, leverage: int, margin_mode_str: str):
     """
     Adjusts the leverage for a given market.
@@ -155,21 +330,48 @@ async def get_market_details(order_api, symbol: str) -> Optional[Tuple[int, floa
         logger.error(f"An error occurred while fetching market details: {e}")
         return None
 
-async def close_long_position(client, position_size, current_mid_price):
-    """Close a long position with a reduce-only limit sell order."""
+async def submit_reduce_only_close_order(client, position_size, current_mid_price):
+    """Submit a reduce-only order to close an existing position using Avellaneda pricing when available."""
     global current_order_id
-    logger.info(f"Attempting to close long position of size {position_size}")
-    # Place the sell order slightly above the mid-price to ensure it's not immediately taken
-    sell_price = current_mid_price * (1.0 + SPREAD) 
+
+    magnitude = abs(position_size)
+    if magnitude < 1e-9:
+        logger.info("Position already flat; no close order submitted.")
+        return True
+
+    base_units = int(magnitude / AMOUNT_TICK_SIZE)
+    if base_units <= 0:
+        logger.warning(
+            f"Position size {position_size} insufficient for tick size {AMOUNT_TICK_SIZE}; skipping close order."
+        )
+        return False
+
+    is_long = position_size > 0
+    side = "sell" if is_long else "buy"
+    target_price = calculate_order_price(current_mid_price, side)
+    if target_price is None or target_price <= 0:
+        if side == "sell":
+            target_price = current_mid_price * (1.0 + SPREAD)
+        else:
+            target_price = current_mid_price * max(1.0 - SPREAD, 0.0001)
+        logger.warning(
+            f"Falling back to static spread pricing for {side} close order: target ${target_price:.6f}."
+        )
+
+    target_price = max(target_price, PRICE_TICK_SIZE)
+
     order_id = int(time.time() * 1_000_000) % 1_000_000
-    logger.info(f"Placing reduce-only sell order at {sell_price} to close long position")
+    logger.info(
+        f"Placing reduce-only {side} order at ${target_price:.6f} to close {position_label(position_size)} position of {position_size}."
+    )
+
     try:
         tx, tx_hash, err = await client.create_order(
             market_index=MARKET_ID,
             client_order_index=order_id,
-            base_amount=int(abs(position_size) / AMOUNT_TICK_SIZE),
-            price=int(sell_price / PRICE_TICK_SIZE),
-            is_ask=True,
+            base_amount=base_units,
+            price=int(target_price / PRICE_TICK_SIZE),
+            is_ask=is_long,
             order_type=lighter.SignerClient.ORDER_TYPE_LIMIT,
             time_in_force=lighter.SignerClient.ORDER_TIME_IN_FORCE_POST_ONLY,
             reduce_only=True
@@ -181,8 +383,62 @@ async def close_long_position(client, position_size, current_mid_price):
         current_order_id = order_id
         return True
     except Exception as e:
-        logger.error(f"Exception in close_long_position: {e}", exc_info=True)
+        logger.error(f"Exception while submitting close order: {e}", exc_info=True)
         return False
+
+
+async def close_open_position_and_wait(client) -> bool:
+    """Continuously attempts to flatten any significant existing position before the strategy starts."""
+    global last_mid_price
+
+    last_logged_size = None
+    last_submit_time = 0.0
+
+    while True:
+        mid = get_current_mid_price()
+        if not mid:
+            logger.info("Waiting for market data before evaluating startup position.")
+            await asyncio.sleep(3)
+            continue
+
+        current_size = current_position_size
+        significant = is_position_significant(current_size, mid)
+
+        if not significant:
+            if current_order_id is not None:
+                await cancel_order(client, current_order_id)
+            value = get_position_value_usd(current_size, mid)
+            logger.info(
+                f"Startup inventory {current_size} ({position_label(current_size)}) valued at ${value:.2f} < ${POSITION_VALUE_THRESHOLD_USD:.2f}; treating as flat."
+            )
+            return True
+
+        if last_logged_size != current_size:
+            value = get_position_value_usd(current_size, mid)
+            logger.info(
+                f"🔄 Ensuring flat start. Outstanding {position_label(current_size)} position {current_size} worth ${value:.2f}."
+            )
+            last_logged_size = current_size
+
+        need_new_order = (current_order_id is None) or ((time.time() - last_submit_time) >= ORDER_TIMEOUT)
+        if need_new_order:
+            if current_order_id is not None:
+                await cancel_order(client, current_order_id)
+
+            success = await submit_reduce_only_close_order(client, current_size, mid)
+            if not success:
+                logger.warning("Failed to submit reduce-only close order; retrying shortly.")
+                await asyncio.sleep(5)
+                continue
+
+            last_submit_time = time.time()
+            last_mid_price = mid
+        else:
+            logger.info(
+                f"Waiting for reduce-only order {current_order_id} to flatten startup position {current_size}."
+            )
+
+        await asyncio.sleep(3)
 
 def on_order_book_update(market_id, order_book):
     global latest_order_book, ws_connection_healthy, last_order_book_update, current_mid_price_cached
@@ -446,6 +702,7 @@ def calculate_order_price(mid_price, side) -> Optional[float]:
 async def place_order(client, side, price, order_id, base_amount):
     global current_order_id
     is_ask = (side == "sell")
+    reduce_only_flag = (side == get_closing_side())
     base_amount_scaled = int(base_amount / AMOUNT_TICK_SIZE)
     price_scaled = int(price / PRICE_TICK_SIZE)
     logger.info(f"Placing {side} order: {base_amount:.6f} units at ${price:.6f} (ID: {order_id})")
@@ -458,7 +715,7 @@ async def place_order(client, side, price, order_id, base_amount):
             is_ask=is_ask,
             order_type=lighter.SignerClient.ORDER_TYPE_LIMIT,
             time_in_force=lighter.SignerClient.ORDER_TIME_IN_FORCE_POST_ONLY,
-            reduce_only=(side == "sell")
+            reduce_only=reduce_only_flag
         )
         if err is not None:
             logger.error(f"Error placing {side} order: {trim_exception(err)}")
@@ -537,6 +794,8 @@ async def market_making_loop(client, account_api, order_api):
 
     while True:
         try:
+            opening_side = get_opening_side()
+            closing_side = get_closing_side()
             if not await check_websocket_health():
                 logger.warning("⚠ Websocket connection unhealthy, attempting restart...")
                 if not await restart_websocket():
@@ -572,18 +831,22 @@ async def market_making_loop(client, account_api, order_api):
 
             if current_order_id is None:
                 order_id = int(time.time() * 1_000_000) % 1_000_000
-                base_amt = 0
-                if order_side == "buy":
+                base_amt = 0.0
+
+                if order_side == opening_side:
                     base_amt = await calculate_dynamic_base_amount(current_mid_price)
-                else:  # sell side
-                    if current_position_size > 0:
-                        position_value_usd = current_position_size * current_mid_price
-                        if position_value_usd >= 15.0:
-                            base_amt = current_position_size
+                else:
+                    closable_units = get_closable_units(current_position_size)
+                    if closable_units > 0:
+                        position_value_usd = closable_units * current_mid_price
+                        if position_value_usd >= POSITION_VALUE_THRESHOLD_USD:
+                            base_amt = closable_units
                         else:
-                            logger.info(f"Position value ${position_value_usd:.2f} is less than $15, skipping sell order for this cycle.")
+                            logger.info(
+                                f"Position value ${position_value_usd:.2f} is below ${POSITION_VALUE_THRESHOLD_USD:.2f}; skipping closing order this cycle."
+                            )
                     else:
-                        logger.info("Sell side but no inventory to sell → skip.")
+                        logger.info("No position to close; skipping closing order.")
 
                 if base_amt > 0:
                     last_order_base_amount = base_amt
@@ -593,9 +856,8 @@ async def market_making_loop(client, account_api, order_api):
                         continue
                     last_mid_price = current_mid_price
                 else:
-                    # Only log warning for buy side, sell side already has info logs
-                    if order_side == "buy":
-                        logger.warning("Calculated order size is zero, skip.")
+                    if order_side == opening_side:
+                        logger.warning("Calculated opening order size is zero, skip.")
 
             # This is the main logic for the "reconcile-after-timeout" strategy.
             # We wait for a set period, then cancel the order and check our final position.
@@ -607,24 +869,40 @@ async def market_making_loop(client, account_api, order_api):
 
             # After cancelling, current_position_size (updated by the websocket) is our ground truth.
             # Now, we decide if we need to flip the side based on our actual inventory.
-            position_value_usd = (current_position_size * current_mid_price) if current_mid_price else 0
-            if order_side == "buy" and current_position_size > 0:
-                if position_value_usd >= 15.0:
-                    logger.info(f"✅ Position opened after buy cycle, value ${position_value_usd:.2f} is sufficient. Flipping to sell side. New inventory: {current_position_size}")
-                    order_side = "sell"
-                else:
-                    logger.info(f"Position opened after buy cycle, but value ${position_value_usd:.2f} is < $15. Remaining on buy side to accumulate more. Inventory: {current_position_size}")
-                    # order_side remains "buy"
-            elif order_side == "sell" and abs(current_position_size) < 1e-9:
-                logger.info(f"✅ Position closed after sell cycle. New inventory: 0")
-                order_side = "buy"
-                last_order_base_amount = 0  # Reset after a successful sell
-            elif order_side == "sell" and current_position_size > 0 and position_value_usd < 15.0:
-                logger.info(f"Position value ${position_value_usd:.2f} is too small to sell. Flipping to buy side to accumulate more.")
-                order_side = "buy"
-            else:
-                logger.info(f"No fill or partial fill did not close position. Current inventory: {current_position_size}. Remaining on {order_side} side.")
+            position_value_usd = get_position_value_usd(current_position_size, current_mid_price)
+            inventory_desc = position_label(current_position_size)
 
+            if order_side == opening_side:
+                if has_position_to_close(current_position_size):
+                    if position_value_usd >= POSITION_VALUE_THRESHOLD_USD:
+                        logger.info(
+                            f"✅ Position opened after {order_side} cycle with {inventory_desc} inventory {current_position_size}. Value ${position_value_usd:.2f} is sufficient; switching to {closing_side} side."
+                        )
+                        order_side = closing_side
+                    else:
+                        logger.info(
+                            f"Position opened after {order_side} cycle, but value ${position_value_usd:.2f} is below ${POSITION_VALUE_THRESHOLD_USD:.2f}. Remaining on {opening_side} side to accumulate more. Inventory: {current_position_size}."
+                        )
+                else:
+                    logger.info(
+                        f"No fill detected during {order_side} cycle. Inventory: {current_position_size} ({inventory_desc}). Remaining on {opening_side} side."
+                    )
+            else:
+                if not has_position_to_close(current_position_size):
+                    logger.info(f"✅ Position closed after {order_side} cycle. Inventory: 0 (flat).")
+                    order_side = opening_side
+                    last_order_base_amount = 0
+                elif position_value_usd < POSITION_VALUE_THRESHOLD_USD:
+                    logger.info(
+                        f"Position value ${position_value_usd:.2f} is below ${POSITION_VALUE_THRESHOLD_USD:.2f}. Switching to {opening_side} side to adjust exposure. Inventory: {current_position_size} ({inventory_desc})."
+                    )
+                    order_side = opening_side
+                else:
+                    logger.info(
+                        f"No fill or partial fill left {inventory_desc} inventory {current_position_size}. Remaining on {order_side} side."
+                    )
+
+            apply_flip_target_if_idle()
             await asyncio.sleep(2)
 
         except Exception as e:
@@ -657,6 +935,7 @@ async def main():
     global MARKET_ID, PRICE_TICK_SIZE, AMOUNT_TICK_SIZE
     global ws_client, ws_task, last_order_book_update, position_detected_at_startup
     global last_mid_price, current_order_id, current_position_size, order_side
+    global flip_state, flip_target_state, flip_change_block_logged
 
     logger.info("=== Market Maker Starting ===")
 
@@ -723,9 +1002,33 @@ async def main():
         await asyncio.wait_for(account_all_received.wait(), timeout=30.0)
         logger.info(f"✅ Received initial position data. Current size: {current_position_size}")
 
+        if current_position_size > 0:
+            flip_state = False
+        elif current_position_size < 0:
+            flip_state = True
+        flip_target_state = flip_state
+        flip_change_block_logged = False
+        order_side = get_opening_side()
+
+        opening_side = get_opening_side()
+        closing_side = get_closing_side()
+
+        if abs(current_position_size) >= 1e-9:
+            order_side = closing_side
+            closed = await close_open_position_and_wait(client)
+            if not closed:
+                await api_client.close()
+                await client.close()
+                return
+            current_position_size = 0
+            order_side = get_opening_side()
+
+        update_flip_target_from_supertrend(initial=True)
+        apply_flip_target_if_idle()
+
         # Adjust leverage at startup if no position is open
         mid_price = get_current_mid_price()
-        if current_position_size*mid_price <= 15.0 and current_order_id is None:
+        if mid_price and abs(current_position_size) * mid_price <= POSITION_VALUE_THRESHOLD_USD and current_order_id is None:
             if LEVERAGE > 1:
                 logger.info(f"Attempting to set leverage to {LEVERAGE}x with {MARGIN_MODE} margin...")
                 _, _, err = await adjust_leverage(client, MARKET_ID, LEVERAGE, MARGIN_MODE)
@@ -737,51 +1040,33 @@ async def main():
                     logger.info(f"Successfully set leverage to {LEVERAGE}x")
             else:
                 logger.info("Leverage is set to 1, no adjustment needed.")
-
-        # Automatically close an existing long position at startup if requested
-        if CLOSE_LONG_ON_STARTUP:
-            if current_position_size > 0:
-                mid = get_current_mid_price()
-                if mid:
-                    logger.info(f"🔄 Closing existing long position of size {current_position_size} at startup (flag ON)")
-                    ok = await close_long_position(client, current_position_size, mid)
-                    if ok:
-                        order_side = "sell"
-                        last_mid_price = mid
-                        logger.info(f"✅ Reduce-only sell placed. Waiting for websocket to confirm position change.")
-                        
-                        # Wait for the position to close with a timeout
-                        close_confirmed = False
-                        start_time = time.time()
-                        while time.time() - start_time < 60: # 60 second timeout
-                            if abs(current_position_size) < 1e-9:
-                                logger.info("✅ Position successfully closed.")
-                                close_confirmed = True
-                                break
-                            await asyncio.sleep(1)
-                        
-                        if not close_confirmed:
-                            logger.error("❌ Timed out waiting for position to close. Exiting.")
-                            return
-
-                else:
-                    logger.warning("No fresh mid price yet; skip auto-close this boot.")
-        elif current_position_size > 0:
-            logger.info(f"Existing position of {current_position_size} detected. Evaluating...")
+        elif has_position_to_close(current_position_size):
+            logger.info(
+                f"Existing {position_label(current_position_size)} position of {current_position_size} detected. Evaluating startup mode..."
+            )
             mid_price = get_current_mid_price()
+            position_value_usd = get_position_value_usd(current_position_size, mid_price)
             if mid_price:
-                position_value_usd = current_position_size * mid_price
-                if position_value_usd < 15.0:
-                    logger.info(f"Position value ${position_value_usd:.2f} is < $15. Starting in buy mode.")
-                    order_side = "buy"
+                if position_value_usd < POSITION_VALUE_THRESHOLD_USD:
+                    logger.info(
+                        f"Position value ${position_value_usd:.2f} is below ${POSITION_VALUE_THRESHOLD_USD:.2f}. Starting in {opening_side} mode."
+                    )
+                    order_side = opening_side
                 else:
-                    logger.info(f"Position value ${position_value_usd:.2f} is >= $15. Starting in sell mode.")
-                    order_side = "sell"
+                    logger.info(
+                        f"Position value ${position_value_usd:.2f} meets threshold. Starting in {closing_side} mode."
+                    )
+                    order_side = closing_side
             else:
-                logger.warning("Could not get mid price to evaluate existing position, defaulting to sell mode.")
-                order_side = "sell"
+                logger.warning(
+                    "Could not get mid price to evaluate existing position, defaulting to closing mode."
+                )
+                order_side = closing_side
+        else:
+            order_side = opening_side
 
         balance_task = asyncio.create_task(track_balance())
+        supertrend_task = asyncio.create_task(monitor_supertrend_params())
         await market_making_loop(client, account_api, order_api)
 
     except asyncio.TimeoutError:
@@ -808,6 +1093,12 @@ async def main():
                 await balance_task
             except asyncio.CancelledError:
                 pass
+        if 'supertrend_task' in locals() and not supertrend_task.done():
+            supertrend_task.cancel()
+            try:
+                await supertrend_task
+            except asyncio.CancelledError:
+                pass
         if current_order_id is not None:
             logger.info(f"Cancelling open order {current_order_id} before exit...")
             await cancel_order(client, current_order_id)
@@ -823,6 +1114,12 @@ async def main():
 
 # ============ Entrypoint with signal handling ============ 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run the Lighter market maker")
+    parser.add_argument("--symbol", default=os.getenv("MARKET_SYMBOL", "PAXG"), help="Market symbol to trade")
+    args = parser.parse_args()
+    MARKET_SYMBOL = args.symbol.upper()
+    os.environ["MARKET_SYMBOL"] = MARKET_SYMBOL
+
     async def main_with_signal_handling():
         loop = asyncio.get_running_loop()
         main_task = asyncio.create_task(main())
