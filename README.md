@@ -15,9 +15,8 @@ The entire system is orchestrated using Docker Compose, making it easy to run an
 
 Important Tips:
 - Use on a dedicated account or sub-account. The bot will try to use all the funds available, and do compound interests.
-- Only use the Market Making with PAXG, many things have to be modified to run for another Crypto, including order size and price input formats
 - You don't need to have the `.env` file to run the data collector service
-- Run first, for 1-2 days, the data collector service only, by edtiting the `docker-compose.yml`  (comment out the market maker service)
+- Run first the data collector service only for some time, by edtiting the `docker-compose.yml`  (comment out the market maker service)
 - To get your `ACCOUNT_INDEX`, you can go to\
    `https://mainnet.zklighter.elliot.ai/api/v1/accountsByL1Address?l1_address=0xcEd...` where `0xcEd...` is your L1 (EVM) wallet address (Metamask, Rabby, Ledger, ...)
 - Freshly coded, probably some bugs, only run with small amount of funds
