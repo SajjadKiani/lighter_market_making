@@ -1,50 +1,40 @@
 version: '3.8'
-
 networks:
-  trading_network:
+  default:
     driver: bridge
     ipam:
       config:
-        - subnet: 172.48.16.0/22
-
+        - subnet: 172.32.44.0/22
 services:
-  # Data collection service
   lighter-data-collector:
     build: .
     container_name: lighter-collector
     restart: unless-stopped
-    networks:
-      - trading_network
     volumes:
-      # Shared data directory for CSV files (persist on host)
       - ./lighter_data:/app/lighter_data
-      # Shared logs directory (persist on host)
       - ./logs:/app/logs
+      - ./params:/app/params
+      - ./gather_lighter_data.py:/app/gather_lighter_data.py:ro
+      - ./calculate_avellaneda_parameters.py:/app/calculate_avellaneda_parameters.py:ro
+      - ./market_maker.py:/app/market_maker.py:ro
+      - ./.env:/app/.env:ro
     environment:
       - PYTHONUNBUFFERED=1
       - LOG_DIR=/app/logs
     command: python gather_lighter_data.py
-    healthcheck:
-      test: ["CMD", "python", "-c", "import os; exit(0 if os.path.exists('/app/logs/debug.log') else 1)"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
 
-  # Avellaneda parameters calculator service
   avellaneda-calculator:
     build: .
     container_name: avellaneda-calculator
     restart: unless-stopped
-    networks:
-      - trading_network
     volumes:
-      # Read data in Read-Only mode
       - ./lighter_data:/app/lighter_data:ro
-      # Write parameters HERE (directory, not a file)
-      - ./params:/app/params
-      # Shared logs
       - ./logs:/app/logs
+      - ./params:/app/params
+      - ./calculate_avellaneda_parameters.py:/app/calculate_avellaneda_parameters.py:ro
+      - ./.env:/app/.env:ro
+    env_file:
+      - .env
     environment:
       - PYTHONUNBUFFERED=1
       - HL_DATA_LOC=/app/lighter_data
@@ -53,60 +43,67 @@ services:
     command: >
       sh -c "
         while true; do
-          echo '📊 Calculating Avellaneda parameters...';
-          python calculate_avellaneda_parameters.py PAXG --hours 4;
-          echo '⏰ Waiting 2 hours before next calculation...';
-          sleep 7200;
+          echo 'Calculating Avellaneda parameters...';
+          python calculate_avellaneda_parameters.py ${MARKET_SYMBOL:-PAXG} --minutes 10;
+          echo 'Sleeping before next run...';
+          sleep 600;
         done
       "
     depends_on:
       - lighter-data-collector
-    healthcheck:
-      test: ["CMD", "test", "-f", "/app/params/avellaneda_parameters_PAXG.json"]
-      interval: 60s
-      timeout: 10s
-      retries: 3
-      start_period: 300s
 
-  # Market maker trading service
-  market_maker:
+  supertrend-calculator:
     build: .
-    container_name: market-maker
+    container_name: supertrend-calculator
     restart: unless-stopped
-    networks:
-      - trading_network
-    volumes:
-      # Read parameters from the persistent directory
-      - ./params:/app/params:ro
-      # Shared logs
-      - ./logs:/app/logs
     working_dir: /app
+    volumes:
+      - ./params:/app/params
+      - ./logs:/app/logs
+      - ./find_trend_lighter.py:/app/find_trend_lighter.py:ro
+      - ./.env:/app/.env:ro
     env_file:
       - .env
     environment:
-      - CLOSE_LONG_ON_STARTUP=false
       - PYTHONUNBUFFERED=1
       - PARAMS_DIR=/app/params
       - LOG_DIR=/app/logs
-      - LEVERAGE=2
-      - MARGIN_MODE=cross
-      # Set to true if you want to block the MM until there is a valid JSON
-      - REQUIRE_PARAMS=true
-      # Scheduled restart to reload files and release any potential memory leaks
-      - RESTART_INTERVAL_MINUTES=5
     command: >
       sh -c "
         while true; do
-          echo '🚀 Starting market maker...';
-          timeout ${RESTART_INTERVAL_MINUTES:-5}m python market_maker.py || true;
-          echo '🔄 Restarting in 2 seconds...';
-          sleep 2;
+          echo 'Running supertrend calculator...';
+          python find_trend_lighter.py --symbol ${MARKET_SYMBOL:-PAXG} --interval 1m;
+          echo 'Sleeping for 2 minutes...';
+          sleep 120;
+        done
+      "
+    depends_on:
+      - lighter-data-collector
+
+  market-maker:
+    build: .
+    container_name: market-maker
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - ./params:/app/params:ro
+      - ./logs:/app/logs
+      - ./market_maker.py:/app/market_maker.py:ro
+      - ./.env:/app/.env:ro
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PARAMS_DIR=/app/params
+      - LOG_DIR=/app/logs
+    command: >
+      sh -c "
+        while true; do
+          echo 'Starting market maker...';
+          python market_maker.py --symbol ${MARKET_SYMBOL:-PAXG};
+          echo 'Restarting in 10 seconds...';
+          sleep 10;
         done
       "
     depends_on:
       - avellaneda-calculator
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
