@@ -30,30 +30,53 @@ This is the most important step. You must set the `MARKET_SYMBOL` environment va
 
 ### 3. `docker-compose.yml`
 
-You need to update the ticker symbol in the `avellaneda-calculator` service to match the one you set in your `.env` file.
+You need to update the ticker symbol in the `avellaneda-calculator` and `find-trend` services to match the one you set in your `.env` file.
 
-*   **`command`:** Change `PAXG` to your new ticker (e.g., `BTC`).
-    ```yaml
-    # In the avellaneda-calculator service
-    command: >
-      sh -c "
-        while true; do
-          echo '📊 Calculating Avellaneda parameters...';
-          python calculate_avellaneda_parameters.py BTC --hours 4;
-          echo '⏰ Waiting 2 hours before next calculation...';
-          sleep 7200;
-        done
-      "
-    ```
+*   **`avellaneda-calculator` service:**
+    *   **`command`:** Change `PAXG` to your new ticker (e.g., `BTC`).
+        ```yaml
+        # In the avellaneda-calculator service
+        command: >
+          sh -c "
+            while true; do
+              echo '📊 Calculating Avellaneda parameters...';
+              python calculate_avellaneda_parameters.py BTC --hours 4;
+              echo '⏰ Waiting 2 hours before next calculation...';
+              sleep 7200;
+            done
+          "
+        ```
 
-*   **`healthcheck`:** Update the filename in the healthcheck to match your new ticker.
-    ```yaml
-    # In the avellaneda-calculator service
-    healthcheck:
-      test: ["CMD", "test", "-f", "/app/params/avellaneda_parameters_BTC.json"]
-    ```
+    *   **`healthcheck`:** Update the filename in the healthcheck to match your new ticker.
+        ```yaml
+        # In the avellaneda-calculator service
+        healthcheck:
+          test: ["CMD", "test", "-f", "/app/params/avellaneda_parameters_BTC.json"]
+        ```
 
-That's it! You no longer need to manually edit `market_maker.py` or `calculate_avellaneda_parameters.py`. The bot will automatically:
+*   **`find-trend` service:**
+    *   **`command`:** Change `PAXG` to your new ticker (e.g., `BTC`).
+        ```yaml
+        # In the find-trend service
+        command: >
+          sh -c "
+            while true; do
+              echo '📈 Finding trend...';
+              python find_trend_lighter.py --symbol BTC --interval 5m;
+              echo '⏰ Waiting 5 minutes before next calculation...';
+              sleep 300;
+            done
+          "
+        ```
+
+    *   **`healthcheck`:** Update the filename in the healthcheck to match your new ticker.
+        ```yaml
+        # In the find-trend service
+        healthcheck:
+          test: ["CMD", "test", "-f", "/app/params/supertrend_params_BTC.json"]
+        ```
+
+That's it! You no longer need to manually edit `market_maker.py`, `calculate_avellaneda_parameters.py`, or `find_trend_lighter.py`. The bot will automatically:
 - Fetch the correct Market ID, tick sizes, and other details from the Lighter API.
-- Load the correct `avellaneda_parameters_<TICKER>.json` file based on the `MARKET_SYMBOL`.
+- Load the correct `avellaneda_parameters_<TICKER>.json` and `supertrend_params_<TICKER>.json` files based on the `MARKET_SYMBOL`.
 
