@@ -49,7 +49,6 @@ pip install -r requirements.txt
 
     # Market Maker Behavior
     MARKET_SYMBOL=PAXG
-    FLIP=false
     ```
 
 2.  **Environment Variables:**
