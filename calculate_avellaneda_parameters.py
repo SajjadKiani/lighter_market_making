@@ -25,6 +25,8 @@ from arch import arch_model
 PARAMS_DIR = os.getenv("PARAMS_DIR", "params")
 os.makedirs(PARAMS_DIR, exist_ok=True)
 
+PERIODS_TO_USE = 8
+
 logging.getLogger('numba').setLevel(logging.WARNING)
 
 def _finite_nonneg(x) -> bool:
@@ -67,7 +69,7 @@ def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description='Calculate Avellaneda-Stoikov market making parameters')
     parser.add_argument('ticker', nargs='?', default='PAXG', help='Ticker symbol (default: BTC)')
-    parser.add_argument('--hours', type=int, default=4, help='Frequency in hours to recalculate parameters (default: 4)')
+    parser.add_argument('--minutes', type=int, default=15, help='Frequency in minutes to recalculate parameters (default: 15)')
     return parser.parse_args()
 
 def get_fallback_tick_size(ticker):
@@ -153,22 +155,75 @@ def load_and_resample_mid_price(csv_path):
     merged.dropna(inplace=True)
     return merged
 
-def calculate_garch_volatility(mid_price_df, H, freq_str):
+
+def prepare_calculation_windows(mid_price_df: pd.DataFrame, trades_df: pd.DataFrame,
+                                window_minutes: int, freq_str: str,
+                                periods_to_keep: int = PERIODS_TO_USE) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Trim datasets to the latest complete periods and limit history for parameter calculations."""
+    period = pd.Timedelta(minutes=window_minutes)
+    expected_points = max(1, int(period.total_seconds()))
+
+    mid_price_df = mid_price_df.sort_index()
+    trades_df = trades_df.sort_index()
+
+    def get_period_starts(df: pd.DataFrame) -> pd.DatetimeIndex:
+        if df.empty:
+            return pd.DatetimeIndex([])
+        return df.index.floor(freq_str).unique()
+
+    while True:
+        period_starts = get_period_starts(mid_price_df)
+        if len(period_starts) == 0:
+            break
+        last_period_start = period_starts[-1]
+        last_period_end = last_period_start + period
+        mask = (mid_price_df.index >= last_period_start) & (mid_price_df.index < last_period_end)
+        if mid_price_df.loc[mask].shape[0] < expected_points:
+            mid_price_df = mid_price_df.loc[mid_price_df.index < last_period_start]
+            trades_df = trades_df.loc[trades_df.index < last_period_start]
+            continue
+        break
+
+    # Drop incomplete leading periods
+    while True:
+        period_starts = get_period_starts(mid_price_df)
+        if len(period_starts) == 0:
+            break
+        first_period_start = period_starts[0]
+        first_period_end = first_period_start + period
+        mask = (mid_price_df.index >= first_period_start) & (mid_price_df.index < first_period_end)
+        if mid_price_df.loc[mask].shape[0] < expected_points:
+            mid_price_df = mid_price_df.loc[mid_price_df.index >= first_period_end]
+            trades_df = trades_df.loc[trades_df.index >= first_period_end]
+            continue
+        break
+
+    period_starts = get_period_starts(mid_price_df)
+    if len(period_starts) > periods_to_keep:
+        selected_starts = period_starts[-periods_to_keep:]
+        window_start = selected_starts[0]
+        window_end = selected_starts[-1] + period
+        mid_price_df = mid_price_df.loc[(mid_price_df.index >= window_start) & (mid_price_df.index < window_end)]
+        trades_df = trades_df.loc[(trades_df.index >= window_start) & (trades_df.index < window_end)]
+
+    return mid_price_df, trades_df
+
+def calculate_garch_volatility(mid_price_df, window_minutes, freq_str):
     """
     Calculate volatility using GARCH(1,1) model with Student's t distribution.
     """
     print("Calculating GARCH(1,1) Volatility...")
     
-    list_of_periods = mid_price_df.index.floor(freq_str).unique().tolist()[:-1]
-    
-    if len(list_of_periods) < 2:
+    list_of_periods = mid_price_df.index.floor(freq_str).unique().tolist()
+
+    if len(list_of_periods) < 1:
         print("Insufficient data for GARCH modeling.")
         return []
     
     sigma_garch_list = []
     
     for i, period_start in enumerate(list_of_periods):
-        period_end = period_start + pd.Timedelta(hours=H)
+        period_end = period_start + pd.Timedelta(minutes=window_minutes)
         
         # For GARCH, we want to use all data up to the current period
         # This gives us better estimates with more historical context
@@ -203,7 +258,7 @@ def calculate_garch_volatility(mid_price_df, H, freq_str):
             volatility_decimal = volatility_next / 100.0 / scale_fact
             
             # Scale to daily volatility
-            sigma_daily = volatility_decimal * np.sqrt(86400/24*H)
+            sigma_daily = volatility_decimal * np.sqrt(60 * window_minutes)
             
             sigma_garch_list.append(sigma_daily)
             
@@ -231,7 +286,7 @@ def calculate_garch_volatility(mid_price_df, H, freq_str):
     
     return sigma_garch_list
 
-def calculate_rolling_volatility(mid_price_df, H, freq_str):
+def calculate_rolling_volatility(mid_price_df, window_minutes, freq_str):
     """Calculate rolling volatility (sigma) using a period-based window."""
     print("Calculating rolling volatility as fallback...")
     
@@ -248,13 +303,13 @@ def calculate_rolling_volatility(mid_price_df, H, freq_str):
     else:
         actual_window = window_periods
     
-    print(f"Using rolling window of {actual_window} periods ({actual_window * H} hours)")
+    total_minutes = actual_window * window_minutes
+    print(f"Using rolling window of {actual_window} periods ({total_minutes} minutes)")
     
     # Apply rolling mean for smoothing
     smoothed_std = period_std.rolling(window=actual_window, min_periods=1).mean()
     
-    sigma_list = (smoothed_std * np.sqrt(86400/24*H)).tolist()
-    sigma_list = sigma_list[:-1]
+    sigma_list = (smoothed_std * np.sqrt(60 * window_minutes)).tolist()
     
     if sigma_list:
         print("Latest rolling sigma values:")
@@ -265,24 +320,26 @@ def calculate_rolling_volatility(mid_price_df, H, freq_str):
         print("Rolling sigma values not available.")
     return sigma_list
 
-def calculate_volatility(mid_price_df, H, freq_str):
+def calculate_volatility(mid_price_df, window_minutes, freq_str):
     """
     Calculate volatility (sigma) using GARCH and falling back to rolling standard deviation for missing values.
     """
     print("\n" + "-"*20)
     print("Calculating volatility (sigma)...")
 
-    num_periods = len(mid_price_df.index.floor(freq_str).unique().tolist()[:-1])
+    period_starts = mid_price_df.index.floor(freq_str).unique().tolist()
+    num_periods = len(period_starts)
 
-    if num_periods < 10:
-        print("Fewer than 10 periods available, using rolling volatility only.")
-        final_sigma = calculate_rolling_volatility(mid_price_df, H, freq_str)
+    min_periods_for_garch = 5
+    if num_periods < min_periods_for_garch:
+        print(f"Fewer than {min_periods_for_garch} periods available, using rolling volatility only.")
+        final_sigma = calculate_rolling_volatility(mid_price_df, window_minutes, freq_str)
     else:
         # 1. Calculate GARCH volatility
-        garch_sigma = calculate_garch_volatility(mid_price_df, H, freq_str)
+        garch_sigma = calculate_garch_volatility(mid_price_df, window_minutes, freq_str)
 
         # 2. Calculate rolling volatility as a fallback
-        rolling_sigma = calculate_rolling_volatility(mid_price_df, H, freq_str)
+        rolling_sigma = calculate_rolling_volatility(mid_price_df, window_minutes, freq_str)
 
         # Ensure lists are of the same length
         if len(garch_sigma) < num_periods:
@@ -298,13 +355,22 @@ def calculate_volatility(mid_price_df, H, freq_str):
         print("\nCombining GARCH and rolling volatility...")
         for i, (g, r) in enumerate(zip(garch_sigma, rolling_sigma)):
             if pd.notna(g):
-                final_sigma.append(g)
-            else:
-                if pd.notna(r):
+                use_garch = True
+                if pd.notna(r) and abs(r) > 1e-12:
+                    ratio = g / r
+                    if ratio > 5.0 or ratio < 0.2:
+                        print(f"  - Period {i}: GARCH sigma {g:.6f} deviates too much from rolling {r:.6f}. Using rolling value.")
+                        use_garch = False
+                if use_garch:
+                    final_sigma.append(g)
+                    continue
+            if pd.notna(r):
+                if pd.isna(g):
                     print(f"  - Period {i}: GARCH failed, using rolling value: {r:.6f}")
-                else:
-                    print(f"  - Period {i}: Both GARCH and rolling failed.")
                 final_sigma.append(r)
+            else:
+                print(f"  - Period {i}: Both GARCH and rolling failed.")
+                final_sigma.append(np.nan)
     
     # Forward fill any remaining NaNs from the start
     final_sigma_series = pd.Series(final_sigma).ffill()
@@ -322,7 +388,7 @@ def calculate_volatility(mid_price_df, H, freq_str):
 
     return final_sigma
 
-def calculate_intensity_params(list_of_periods, H, buy_orders, sell_orders, deltalist, mid_price_df):
+def calculate_intensity_params(list_of_periods, window_minutes, buy_orders, sell_orders, deltalist, mid_price_df):
     """Calculate order arrival intensity parameters (A and k)."""
     print("\n" + "-"*20)
     print("Calculating order arrival intensity (A and k)...")
@@ -334,7 +400,7 @@ def calculate_intensity_params(list_of_periods, H, buy_orders, sell_orders, delt
 
     for i in range(len(list_of_periods)):
         period_start = list_of_periods[i]
-        period_end = period_start + pd.Timedelta(hours=H)
+        period_end = period_start + pd.Timedelta(minutes=window_minutes)
 
         mask_buy = (buy_orders.index >= period_start) & (buy_orders.index < period_end)
         period_buy_orders = buy_orders.loc[mask_buy].copy()
@@ -385,7 +451,7 @@ def calculate_intensity_params(list_of_periods, H, buy_orders, sell_orders, delt
                 deltas = hit_times.to_series().diff().dt.total_seconds().dropna()
                 deltadict[price_delta] = deltas
             else:
-                deltadict[price_delta] = pd.Series([H * 3600])
+                deltadict[price_delta] = pd.Series([window_minutes * 60])
 
         lambdas = pd.DataFrame({
             "delta": list(deltadict.keys()),
@@ -409,7 +475,7 @@ def calculate_intensity_params(list_of_periods, H, buy_orders, sell_orders, delt
         print("A and k values not available.")
     return Alist, klist
 
-def optimize_gamma(list_of_periods, sigma_list, Alist, klist, H, ma_window, mid_price_df, buy_trades, sell_trades, tick_size):
+def optimize_gamma(list_of_periods, sigma_list, Alist, klist, window_minutes, ma_window, mid_price_df, buy_trades, sell_trades, tick_size):
     """Optimize risk aversion parameter (gamma) via backtesting."""
     print("\n" + "-"*20)
     print("Optimizing risk aversion (gamma) via backtesting...")
@@ -438,7 +504,7 @@ def optimize_gamma(list_of_periods, sigma_list, Alist, klist, H, ma_window, mid_
             continue
 
         period_start = list_of_periods[j]
-        period_end = period_start + pd.Timedelta(hours=H)
+        period_end = period_start + pd.Timedelta(minutes=window_minutes)
         print(f"\nProcessing period: {period_start} to {period_end}")
 
         mask = (mid_price_df.index >= period_start) & (mid_price_df.index < period_end)
@@ -450,7 +516,7 @@ def optimize_gamma(list_of_periods, sigma_list, Alist, klist, H, ma_window, mid_
             continue
 
         if gamma_grid_to_test is None:
-            gamma_grid_to_test = generate_gamma_grid(s.iloc[-1], sigma, k, H)
+            gamma_grid_to_test = generate_gamma_grid(s.iloc[-1], sigma, k, window_minutes)
 
         if gamma_grid_to_test is None:
             print("Could not find a reasonable gamma interval. Aborting.")
@@ -464,7 +530,7 @@ def optimize_gamma(list_of_periods, sigma_list, Alist, klist, H, ma_window, mid_
         gamma_results = []
         for i, gamma_to_test in enumerate(gamma_grid_to_test):
             print(f"  - Testing gamma: {gamma_to_test:.5f} ({i+1}/{len(gamma_grid_to_test)})")
-            result = evaluate_gamma(gamma_to_test, s, buy_trades_period, sell_trades_period, k, sigma, H)
+            result = evaluate_gamma(gamma_to_test, s, buy_trades_period, sell_trades_period, k, sigma, window_minutes)
             gamma_results.append(result)
 
         results_df = pd.DataFrame(gamma_results, columns=['gamma', 'pnl', 'spread'])
@@ -485,9 +551,9 @@ def optimize_gamma(list_of_periods, sigma_list, Alist, klist, H, ma_window, mid_
         
     return gammalist
 
-def evaluate_gamma(gamma, mid_prices_period, buy_trades_period, sell_trades_period, k, sigma, H):
+def evaluate_gamma(gamma, mid_prices_period, buy_trades_period, sell_trades_period, k, sigma, window_minutes):
     """Run backtest for a single gamma value and return results."""
-    res = run_backtest(mid_prices_period, buy_trades_period, sell_trades_period, gamma, k, sigma, H)
+    res = run_backtest(mid_prices_period, buy_trades_period, sell_trades_period, gamma, k, sigma, window_minutes)
     final_pnl = res['pnl'][-1]
     
     if np.isnan(final_pnl) or final_pnl == 0:
@@ -496,9 +562,10 @@ def evaluate_gamma(gamma, mid_prices_period, buy_trades_period, sell_trades_peri
     spread_base = gamma * sigma**2.0 * 0.5 + (2.0 / gamma) * np.log(1.0 + (gamma / k))
     return [round(gamma, 5), final_pnl, spread_base]
 
-def generate_gamma_grid(s, sigma, k, H):
+def generate_gamma_grid(s, sigma, k, window_minutes):
     """Generate a grid of gamma values to test."""
-    time_remaining = (H / 2.0) / 24.0
+    window_days = window_minutes / 1440.0
+    time_remaining = window_days / 2.0
     
     def spread(gamma):
         return (gamma * sigma**2 * time_remaining + (2.0 / gamma) * np.log(1.0 + (gamma / k))) / s * 100.0
@@ -584,7 +651,7 @@ def jit_backtest_loop(s_values, buy_min_values, sell_max_values, gamma, k, sigma
         pnl[i+1] = x[i+1] + q[i+1] * s_values[i]
     return pnl, x, q, spr, r, r_a, r_b
 
-def run_backtest(mid_prices, buy_trades, sell_trades, gamma, k, sigma, H, fee=0.00030):
+def run_backtest(mid_prices, buy_trades, sell_trades, gamma, k, sigma, window_minutes, fee=0.00030):
     """Simulate the market making strategy."""
     # ... (implementation from previous steps, unchanged)
     time_index = mid_prices.index
@@ -594,7 +661,7 @@ def run_backtest(mid_prices, buy_trades, sell_trades, gamma, k, sigma, H, fee=0.
     sell_max = sell_trades_clean['price'].resample('5s').max().reindex(time_index, method='ffill')
     mid_prices = mid_prices.resample('5s').first().reindex(time_index, method='ffill')
     N = len(time_index)
-    T = H / 24.0
+    T = window_minutes / 1440.0
     dt = T / N
     s_values = mid_prices.values
     buy_min_values = buy_min.values
@@ -605,7 +672,7 @@ def run_backtest(mid_prices, buy_trades, sell_trades, gamma, k, sigma, H, fee=0.
     pnl, x, q, spr, r, r_a, r_b = jit_backtest_loop(s_values, buy_min_values, sell_max_values, gamma, k, sigma, fee, time_remaining, spread_base, half_spread)
     return {'pnl': pnl, 'x': x, 'q': q, 'spread': spr, 'r': r, 'r_a': r_a, 'r_b': r_b}
 
-def calculate_final_quotes(gamma, sigma, A, k, H, mid_price_df, ma_window):
+def calculate_final_quotes(gamma, sigma, A, k, window_minutes, mid_price_df, ma_window):
     """Calculate the final reservation price and quotes."""
     print("\n" + "-"*20)
     print("Calculating final parameters for current state...")
@@ -613,6 +680,7 @@ def calculate_final_quotes(gamma, sigma, A, k, H, mid_price_df, ma_window):
     s = mid_price_df.loc[:, 'mid_price'].iloc[-1]
     time_remaining = 0.5
     q = 1.0  # Placeholder for current inventory
+    window_hours = window_minutes / 60.0
 
     spread_base = gamma * sigma**2.0 * time_remaining + (2.0 / gamma) * np.log(1.0 + (gamma / k))
     half_spread = spread_base / 2.0
@@ -631,7 +699,13 @@ def calculate_final_quotes(gamma, sigma, A, k, H, mid_price_df, ma_window):
         "timestamp": pd.Timestamp.now().isoformat(),
         "market_data": {"mid_price": float(s), "sigma": float(sigma), "A": float(A), "k": float(k)},
         "optimal_parameters": {"gamma": float(gamma)},
-        "current_state": {"time_remaining": float(time_remaining), "inventory": int(q), "hours_window": H, "ma_window": ma_window},
+        "current_state": {
+            "time_remaining": float(time_remaining),
+            "inventory": int(q),
+            "minutes_window": window_minutes,
+            "hours_window": window_hours,
+            "ma_window": ma_window
+        },
         "calculated_values": {"reservation_price": float(r), "gap": float(gap), "spread_base": float(spread_base), "half_spread": float(half_spread)},
         "limit_orders": {"ask_price": float(r_a), "bid_price": float(r_b), "delta_a": float(delta_a), "delta_b": float(delta_b),
                          "delta_a_percent": (delta_a / s) * 100.0, "delta_b_percent": (delta_b / s) * 100.0}
@@ -648,12 +722,20 @@ def print_summary(results, list_of_periods):
         return
 
     TICKER = results['ticker']
-    H = results['current_state']['hours_window']
-    ma_window = results['current_state']['ma_window']
+    current_state = results['current_state']
+    window_minutes = current_state.get('minutes_window')
+    window_hours = current_state.get('hours_window')
+    ma_window = current_state['ma_window']
     
     print("\n" + "="*80)
     print(f"AVELLANEDA-STOIKOV MARKET MAKING PARAMETERS - {TICKER}")
-    print(f"Analysis Period: {H} hours")
+    if window_minutes is not None:
+        if window_hours is not None:
+            print(f"Analysis Period: {window_minutes} minutes ({window_hours:.2f} hours)")
+        else:
+            print(f"Analysis Period: {window_minutes} minutes")
+    elif window_hours is not None:
+        print(f"Analysis Period: {window_hours} hours")
     if ma_window > 1:
         print(f"Moving Average Window: {ma_window} periods")
     print("="*80)
@@ -695,15 +777,18 @@ def main():
     global TICKER  # Make TICKER a global variable
     args = parse_arguments()
     TICKER = args.ticker
-    H = args.hours
-    
-    if H <= 8: ma_window = 3
-    elif 8 < H < 20: ma_window = 2
+    window_minutes = args.minutes
+    window_hours = window_minutes / 60.0
+
+    if window_minutes <= 8 * 60:
+        ma_window = 3
+    elif 8 * 60 < window_minutes < 20 * 60:
+        ma_window = 2
     else: ma_window = 1
 
     print("-" * 20)
     print(f"DOING: {TICKER}")
-    print(f"Using analysis period of {H} hours.")
+    print(f"Using analysis period of {window_minutes} minutes ({window_hours:.2f} hours).")
     if ma_window > 1:
         print(f"Using a {ma_window}-period moving average for parameters.")
 
@@ -731,24 +816,35 @@ def main():
         print(f"Error: File {csv_file_path} not found!")
         sys.exit(1)
 
-    mid_price_df = load_and_resample_mid_price(csv_file_path)
-    trades_df = load_trades_data(os.path.join(HL_DATA_DIR, f'trades_{TICKER}.csv'))
-    buy_trades = trades_df[trades_df['side'] == 'buy'].copy()
-    sell_trades = trades_df[trades_df['side'] == 'sell'].copy()
-    print(f"Loaded {len(mid_price_df)} data points from {mid_price_df.index.min()} to {mid_price_df.index.max()}.")
+    mid_price_full_df = load_and_resample_mid_price(csv_file_path)
+    trades_full_df = load_trades_data(os.path.join(HL_DATA_DIR, f'trades_{TICKER}.csv'))
+    print(f"Loaded {len(mid_price_full_df)} data points from {mid_price_full_df.index.min()} to {mid_price_full_df.index.max()}.")
 
-    freq_str = f'{H}h'
-    list_of_periods = mid_price_df.index.floor(freq_str).unique().tolist()[:-1]
+    freq_str = f'{window_minutes}min'
+    calc_mid_price_df, calc_trades_df = prepare_calculation_windows(mid_price_full_df.copy(), trades_full_df.copy(), window_minutes, freq_str, PERIODS_TO_USE)
+
+    buy_trades = calc_trades_df[calc_trades_df['side'] == 'buy'].copy()
+    sell_trades = calc_trades_df[calc_trades_df['side'] == 'sell'].copy()
+
+    list_of_periods = calc_mid_price_df.index.floor(freq_str).unique().tolist()
+
+    if not list_of_periods:
+        print("No complete periods available for parameter calculation.")
+        print_summary({}, list_of_periods)
+        sys.exit()
+
+    used_minutes = window_minutes * len(list_of_periods)
+    print(f"Using last {len(list_of_periods)} completed periods ({used_minutes} minutes) for parameter estimation.")
 
     # Calculate parameters
-    sigma_list = calculate_volatility(mid_price_df, H, freq_str)
-    Alist, klist = calculate_intensity_params(list_of_periods, H, buy_trades, sell_trades, delta_list, mid_price_df)
-    
+    sigma_list = calculate_volatility(calc_mid_price_df, window_minutes, freq_str)
+    Alist, klist = calculate_intensity_params(list_of_periods, window_minutes, buy_trades, sell_trades, delta_list, calc_mid_price_df)
+
     if len(list_of_periods) <= 1:
         print_summary({}, list_of_periods)
         sys.exit()
 
-    gammalist = optimize_gamma(list_of_periods, sigma_list, Alist, klist, H, ma_window, mid_price_df, buy_trades, sell_trades, tick_size)
+    gammalist = optimize_gamma(list_of_periods, sigma_list, Alist, klist, window_minutes, ma_window, calc_mid_price_df, buy_trades, sell_trades, tick_size)
 
     # Final calculations
     if len(gammalist) > 0:
@@ -762,22 +858,23 @@ def main():
         gamma = 0.1
 
     if ma_window > 1:
-        start_index = max(0, len(Alist) - 1 - ma_window + 1)
-        end_index = len(Alist) - 1
-        a_slice = Alist[start_index:end_index]
-        k_slice = klist[start_index:end_index]
+        start_index = max(0, len(Alist) - ma_window)
+        a_slice = Alist[start_index:]
+        k_slice = klist[start_index:]
         A = pd.Series(a_slice).mean()
         k = pd.Series(k_slice).mean()
     else:
-        A = Alist[-2] if len(Alist) > 1 else Alist[-1]
-        k = klist[-2] if len(klist) > 1 else klist[-1]
+        A = Alist[-1]
+        k = klist[-1]
 
-    if pd.isna(A): A = Alist[-2] if len(Alist) > 1 else Alist[-1]
-    if pd.isna(k): k = klist[-2] if len(klist) > 1 else klist[-1]
+    if pd.isna(A):
+        A = Alist[-1]
+    if pd.isna(k):
+        k = klist[-1]
     
-    sigma = sigma_list[-2] if len(sigma_list) > 1 else sigma_list[-1]
+    sigma = sigma_list[-1]
 
-    results = calculate_final_quotes(gamma, sigma, A, k, H, mid_price_df, ma_window)
+    results = calculate_final_quotes(gamma, sigma, A, k, window_minutes, mid_price_full_df, ma_window)
     print_summary(results, list_of_periods)
 
 if __name__ == "__main__":
