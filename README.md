@@ -53,7 +53,7 @@ pip install -r requirements.txt
     *   `API_KEY_PRIVATE_KEY`, `ACCOUNT_INDEX`, `API_KEY_INDEX`: Your Lighter exchange credentials.
     *   `MARKET_SYMBOL`: The market to trade on (e.g., PAXG, BTC, ETH). Defaults to `PAXG`.
     *   `REQUIRE_PARAMS`: (true/false) If true, the market maker will *not* place any orders until valid Avellaneda parameters are calculated. If false, it will use a static fallback spread. Defaults to `false`.
-    *   `LEVERAGE`: The amount of leverage to use (e.g., 1, 2, 5, 8). This value multiplies your available capital, allowing for larger position sizes. It can be configured in the `docker-compose.yml` file. Defaults to `2` (`1` means no leverage).
+    *   `LEVERAGE`: The amount of leverage to use (e.g., 1, 2, 5, 8). This value multiplies your available capital, allowing for larger position sizes. It can be configured in the `docker-compose.yml` file. Defaults to `1` (`1` means no leverage).
     *   `FLIP`: (true/false) If true, the bot will adopt a short-biased strategy, selling first and then buying back. If false, it will follow a long-biased strategy, buying first and then selling. Defaults to `false`.
 
 You can obtain the API credentials from the Lighter exchange.
