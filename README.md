@@ -2,7 +2,7 @@
 
 This project is a complete market making solution for the Lighter DEX, built in Python. It consists of four main components that work together to collect data, calculate optimal trading parameters, determine the market trend, and execute a market making strategy.
 
-By default, it uses 25% of available capital per order (configurable via `CAPITAL_USAGE_PERCENT`). It can use leverage (2 by default; for example, if your account has 100$, it will apply 2x leverage and use 25% of the leveraged amount ($200 * 0.25 = $50) per order.
+By default, it uses 25% of available capital per order (configurable via `CAPITAL_USAGE_PERCENT`). It can use leverage (1 by default = no leverage; for example, if your account has 100$ and you set leverage to 2, it will apply 2x leverage and use 25% of the leveraged amount ($200 * 0.25 = $50) per order.
 
 The four core components are:
 1.  **Data Collector (`gather_lighter_data.py`)**: Connects to the Lighter DEX websocket to stream real-time order book and trade data, saving it to CSV files.
@@ -55,7 +55,7 @@ pip install -r requirements.txt
     *   `CLOSE_LONG_ON_STARTUP`: (true/false) If true, the bot will attempt to close any existing long position in the specified market on startup. Defaults to `false`.
     *   `REQUIRE_PARAMS`: (true/false) If true, the market maker will *not* place any orders until valid Avellaneda parameters are calculated. If false, it will use a static fallback spread. Defaults to `false`.
     *   `RESTART_INTERVAL_MINUTES`: The market maker service will automatically restart after this many minutes. This helps in reloading parameters and preventing potential memory leaks. Defaults to `5`.
-    *   `LEVERAGE`: The amount of leverage to use (e.g., 1, 2, 5, 8). This value multiplies your available capital, allowing for larger position sizes. It can be configured in the `docker-compose.yml` file. Defaults to `2` (`1` means no leverage).
+    *   `LEVERAGE`: The amount of leverage to use (e.g., 1, 2, 5, 8). This value multiplies your available capital, allowing for larger position sizes. Defaults to `1` (no leverage). Set to `2` for 2x leverage, `5` for 5x leverage, etc.
     *   `MARGIN_MODE`: The margin mode to use, either `cross` or `isolated`. This is also configured in `docker-compose.yml`. Defaults to `cross`.
     *   `FLIP`: (true/false) If true, the bot will adopt a short-biased strategy, selling first and then buying back. If false, it will follow a long-biased strategy, buying first and then selling. Defaults to `false`.
     *   `CAPITAL_USAGE_PERCENT`: (decimal) The percentage of available capital to use per order. Set in the code as `0.25` (25%). This controls position sizing - with 25%, each order uses a quarter of your available leveraged capital. Lower values = smaller positions, higher values = larger positions.
@@ -130,7 +130,8 @@ The `market_maker.py` script is the core of the bot. It reads the parameters fro
 
 **Capital Management**: The bot uses a conservative approach to capital allocation. It applies the following formula for each order:
 - Available Capital × (1 - Safety Margin) × Leverage × Capital Usage Percent
-- Example: $100 × 0.99 × 2 × 0.25 = $49.50 per order
+- Example with default settings: $100 × 0.99 × 1 × 0.25 = $24.75 per order
+- Example with 2x leverage: $100 × 0.99 × 2 × 0.25 = $49.50 per order
 
 The bot will adjust its strategy based on the `FLIP` environment variable, allowing it to switch between long-biased and short-biased strategies. It continuously monitors the market and its own orders, adjusting them as needed to maximize profitability.
 
