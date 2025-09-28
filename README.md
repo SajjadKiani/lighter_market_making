@@ -2,8 +2,6 @@
 
 This project is a complete market making solution for the Lighter DEX, built in Python. It consists of four main components that work together to collect data, calculate optimal trading parameters, determine the market trend, and execute a market making strategy.
 
-By default, it uses 25% of available capital per order (configurable via `CAPITAL_USAGE_PERCENT`). It can use leverage (1 by default = no leverage); for example, if your account has 100$ and you set leverage to 2, it will apply 2x leverage and use 25% of the leveraged amount ($200 * 0.25 = $50) per order.
-
 The four core components are:
 1.  **Data Collector (`gather_lighter_data.py`)**: Connects to the Lighter DEX websocket to stream real-time order book and trade data, saving it to CSV files.
 2.  **Parameter Calculator (`calculate_avellaneda_parameters.py`)**: Implements the Avellaneda-Stoikov model to calculate optimal bid/ask spreads and reservation prices based on the collected data.
@@ -75,6 +73,8 @@ This will start the following services in the background:
 *   `avellaneda-calculator`: Calculates optimal spreads and reservation prices.
 *   `find-trend`: Determines the market trend using the Supertrend indicator.
 *   `market-maker`: Executes the trading strategy.
+
+By default, it uses 25% of available capital per order (configurable via `CAPITAL_USAGE_PERCENT`). It can use leverage (1 by default = no leverage); for example, if your account has 100$ and you set leverage to 2, it will apply 2x leverage and use 25% of the leveraged amount ($200 * 0.25 = $50) per order.
 
 ### Stopping the Bot
 
