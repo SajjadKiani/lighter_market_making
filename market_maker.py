@@ -50,7 +50,7 @@ BASE_AMOUNT = 0.047          # static fallback amount
 USE_DYNAMIC_SIZING = True
 CAPITAL_USAGE_PERCENT = 0.25
 SAFETY_MARGIN_PERCENT = 0.01
-ORDER_TIMEOUT = 15           # seconds
+ORDER_TIMEOUT = 30           # seconds
 
 # Avellaneda
 AVELLANEDA_REFRESH_INTERVAL = 900  # seconds
@@ -1101,7 +1101,22 @@ async def main():
                 pass
         if current_order_id is not None:
             logger.info(f"Cancelling open order {current_order_id} before exit...")
-            await cancel_order(client, current_order_id)
+            try:
+                await asyncio.wait_for(cancel_order(client, current_order_id), timeout=10)
+            except asyncio.TimeoutError:
+                logger.error("Timeout while cancelling order during shutdown.")
+            except Exception as e:
+                logger.error(f"Error cancelling order during shutdown: {e}")
+
+        # As a final safety measure, try to cancel all orders one last time.
+        try:
+            logger.info("Final safety measure: attempting to cancel all orders.")
+            await asyncio.wait_for(client.cancel_all_orders(time_in_force=client.CANCEL_ALL_TIF_IMMEDIATE, time=0), timeout=10)
+        except asyncio.TimeoutError:
+            logger.error("Timeout during final order cancellation.")
+        except Exception as e:
+            logger.error(f"Error during final order cancellation: {e}")
+
         if ws_task and not ws_task.done():
             ws_task.cancel()
             try:
@@ -1125,7 +1140,7 @@ if __name__ == "__main__":
         main_task = asyncio.create_task(main())
 
         def shutdown_handler(sig):
-            logger.info(f"Received exit signal {sig.name}, cancelling main task.")
+            logger.info(f"Received exit signal {sig.name}. Starting graceful shutdown...")
             if not main_task.done():
                 main_task.cancel()
 
