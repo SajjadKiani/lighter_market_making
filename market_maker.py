@@ -188,6 +188,7 @@ def read_supertrend_trend() -> Optional[int]:
         os.path.join(PARAMS_DIR, f"supertrend_params_{MARKET_SYMBOL}.json"),
         f"params/supertrend_params_{MARKET_SYMBOL}.json",
         f"supertrend_params_{MARKET_SYMBOL}.json",
+        f"/app/params/supertrend_params_{MARKET_SYMBOL}.json"
     ]
 
     for path in candidates:
@@ -203,7 +204,8 @@ def read_supertrend_trend() -> Optional[int]:
             logger.error(f"Unexpected error reading {path}: {exc}", exc_info=True)
             return None
 
-        trend_value = data.get("trend")
+        # Try to get trend from current_signal first, then fallback to root level
+        trend_value = data.get("current_signal", {}).get("trend") or data.get("trend")
         if isinstance(trend_value, str):
             try:
                 trend_value = float(trend_value)
