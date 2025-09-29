@@ -16,11 +16,15 @@ from lighter.exceptions import ApiException
 import signal
 from collections import deque
 import argparse
-from .telegram_bot import send_message
+import requests
 
 # =========================
 # Env & constants
 # =========================
+# Telegram
+CHAT_ID=os.getenv('CHAT_ID')
+BOT_TOKEN=os.getenv('TOKEN_BOT')
+
 BASE_URL = "https://mainnet.zklighter.elliot.ai"
 WEBSOCKET_URL = "wss://mainnet.zklighter.elliot.ai/stream"
 API_KEY_PRIVATE_KEY = os.getenv("API_KEY_PRIVATE_KEY")
@@ -124,6 +128,16 @@ logging.root.setLevel(logging.WARNING)
 # =========================
 # Helpers
 # =========================
+def send_message(text):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": text,
+        "parse_mode": "Markdown"  # Optional: can be 'HTML' or 'Markdown'
+    }
+    response = requests.post(url, json=payload)
+    return response.json()
+
 def trim_exception(e: Exception) -> str:
     return str(e).strip().split("\n")[-1]
 
