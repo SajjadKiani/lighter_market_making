@@ -1,0 +1,11 @@
+
+
+.env
+
+logs/
+
+# Ignore log files
+logs/
+
+# Ignore lighter data
+lighter_data/
