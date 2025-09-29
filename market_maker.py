@@ -16,6 +16,7 @@ from lighter.exceptions import ApiException
 import signal
 from collections import deque
 import argparse
+from telegram_bot import send_message
 
 # =========================
 # Env & constants
@@ -45,15 +46,15 @@ LOG_DIR = os.getenv("LOG_DIR", "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 # Trading config
-SPREAD = 0.035 / 100.0       # static fallback spread (if allowed)
+SPREAD = 0.1 / 100.0       # static fallback spread (if allowed)
 BASE_AMOUNT = 0.047          # static fallback amount
 USE_DYNAMIC_SIZING = True
 CAPITAL_USAGE_PERCENT = 0.99
 SAFETY_MARGIN_PERCENT = 0.01
-ORDER_TIMEOUT = 30           # seconds
+ORDER_TIMEOUT = 100           # seconds
 
 # Avellaneda
-AVELLANEDA_REFRESH_INTERVAL = 900  # seconds
+AVELLANEDA_REFRESH_INTERVAL = 300  # seconds
 REQUIRE_PARAMS = os.getenv("REQUIRE_PARAMS", "false").lower() == "true"
 
 # Global WS / state
@@ -483,6 +484,7 @@ def on_user_stats_update(account_id, stats):
             if new_available_capital > 0 and new_portfolio_value > 0:
                 available_capital = new_available_capital
                 portfolio_value = new_portfolio_value
+                send_message(f"💰 Received user stats for account {account_id}: \n\n Available Capital=${available_capital},\n Portfolio Value=${portfolio_value}")
                 logger.info(f"💰 Received user stats for account {account_id}: Available Capital=${available_capital}, Portfolio Value=${portfolio_value}")
                 account_state_received.set()
             else:
@@ -550,6 +552,7 @@ def on_account_all_update(account_id, data):
                 for trade in reversed(all_new_trades):
                      if trade not in recent_trades:
                         recent_trades.append(trade)
+                        send_message(f"New Trade: Market {trade.get('market_id')},\n Type {trade.get('type')},\n Size {trade.get('size')},\n Price {trade.get('price')}")
                         logger.info(f"💱 WebSocket trade update: Market {trade.get('market_id')}, Type {trade.get('type')}, Size {trade.get('size')}, Price {trade.get('price')}")
 
             if not account_all_received.is_set():
