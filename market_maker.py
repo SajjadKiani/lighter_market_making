@@ -23,7 +23,7 @@ import requests
 # =========================
 # Telegram
 CHAT_ID=os.getenv('CHAT_ID')
-BOT_TOKEN=os.getenv('TOKEN_BOT')
+BOT_TOKEN=os.getenv('BOT_TOKEN')
 
 BASE_URL = "https://mainnet.zklighter.elliot.ai"
 WEBSOCKET_URL = "wss://mainnet.zklighter.elliot.ai/stream"
@@ -133,7 +133,6 @@ def send_message(text):
     payload = {
         "chat_id": CHAT_ID,
         "text": text,
-        "parse_mode": "Markdown"  # Optional: can be 'HTML' or 'Markdown'
     }
     response = requests.post(url, json=payload)
     return response.json()
