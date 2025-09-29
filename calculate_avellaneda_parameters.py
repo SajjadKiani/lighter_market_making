@@ -68,7 +68,7 @@ def running_in_docker() -> bool:
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description='Calculate Avellaneda-Stoikov market making parameters')
-    parser.add_argument('ticker', nargs='?', default='PAXG', help='Ticker symbol (default: BTC)')
+    parser.add_argument('--ticker', nargs='?', default='PAXG', help='Ticker symbol (default: BTC)')
     parser.add_argument('--minutes', type=int, default=15, help='Frequency in minutes to recalculate parameters (default: 15)')
     return parser.parse_args()
 

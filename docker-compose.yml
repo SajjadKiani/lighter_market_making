@@ -45,7 +45,7 @@ services:
       sh -c "
         while true; do
           echo 'Calculating Avellaneda parameters...';
-          python calculate_avellaneda_parameters.py $$MARKET_SYMBOL --minutes 10;
+          python calculate_avellaneda_parameters.py --ticker $$MARKET_SYMBOL --minutes 10;
           echo 'Sleeping before next run...';
           sleep $$INTERVAL_SECONDS;
         done

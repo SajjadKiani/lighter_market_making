@@ -16,7 +16,7 @@ from lighter.exceptions import ApiException
 import signal
 from collections import deque
 import argparse
-from telegram_bot import send_message
+from .telegram_bot import send_message
 
 # =========================
 # Env & constants

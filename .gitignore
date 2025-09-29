@@ -11,3 +11,7 @@ params/
 
 # Ignore lighter data
 lighter_data/
+
+venv/
+
+__pycache__/
