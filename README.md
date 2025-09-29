@@ -45,6 +45,9 @@ pip install -r requirements.txt
 
     # Market Maker Behavior
     MARKET_SYMBOL=PAXG
+
+    # Leverage to use
+    LEVERAGE=1
     ```
 
 2.  **Environment Variables:**
