@@ -7,7 +7,7 @@ logs/
 # Ignore log files
 logs/
 
-params
+params/
 
 # Ignore lighter data
 lighter_data/
