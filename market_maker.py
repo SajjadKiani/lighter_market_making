@@ -48,7 +48,7 @@ os.makedirs(LOG_DIR, exist_ok=True)
 SPREAD = 0.035 / 100.0       # static fallback spread (if allowed)
 BASE_AMOUNT = 0.047          # static fallback amount
 USE_DYNAMIC_SIZING = True
-CAPITAL_USAGE_PERCENT = 0.25
+CAPITAL_USAGE_PERCENT = 0.99
 SAFETY_MARGIN_PERCENT = 0.01
 ORDER_TIMEOUT = 30           # seconds
 
@@ -1035,17 +1035,14 @@ async def main():
         # Adjust leverage at startup if no position is open
         mid_price = get_current_mid_price()
         if mid_price and abs(current_position_size) * mid_price <= POSITION_VALUE_THRESHOLD_USD and current_order_id is None:
-            if LEVERAGE > 1:
-                logger.info(f"⚙️ Attempting to set leverage to {LEVERAGE}x with {MARGIN_MODE} margin...")
-                _, _, err = await adjust_leverage(client, MARKET_ID, LEVERAGE, MARGIN_MODE)
-                if err:
-                    logger.error(f"❌ Failed to adjust leverage. Please check permissions or API key capabilities. Error: {err}")
-                    # Depending on the strategy, you might want to exit here.
-                    # For now, we will just log the error and continue with default leverage.
-                else:
-                    logger.info(f"✅ Successfully set leverage to {LEVERAGE}x")
+            logger.info(f"⚙️ Attempting to set leverage to {LEVERAGE}x with {MARGIN_MODE} margin...")
+            _, _, err = await adjust_leverage(client, MARKET_ID, LEVERAGE, MARGIN_MODE)
+            if err:
+                logger.error(f"❌ Failed to adjust leverage. Please check permissions or API key capabilities. Error: {err}")
+                # Depending on the strategy, you might want to exit here.
+                # For now, we will just log the error and continue with default leverage.
             else:
-                logger.info("⚙️ Leverage is set to 1, no adjustment needed.")
+                logger.info(f"✅ Successfully set leverage to {LEVERAGE}x")
         elif has_position_to_close(current_position_size):
             logger.info(
                 f"Existing {position_label(current_position_size)} position of {current_position_size} detected. Evaluating startup mode..."
