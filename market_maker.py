@@ -53,7 +53,7 @@ os.makedirs(LOG_DIR, exist_ok=True)
 SPREAD = 0.1 / 100.0       # static fallback spread (if allowed)
 BASE_AMOUNT = 0.047          # static fallback amount
 USE_DYNAMIC_SIZING = True
-CAPITAL_USAGE_PERCENT = 0.49
+CAPITAL_USAGE_PERCENT = 0.99
 SAFETY_MARGIN_PERCENT = 0.01
 ORDER_TIMEOUT = 100           # seconds
 
@@ -298,7 +298,7 @@ def apply_flip_target_if_idle(force: bool = False) -> bool:
     last_order_base_amount = 0
     flip_change_block_logged = False
     logger.info(f"🔄 Orientation updated: {previous_mode} → {mode_label()} mode.")
-    # send_message(f"🔄 Orientation updated: {previous_mode} → {mode_label()} mode.")
+    send_message(f"🔄 Orientation updated: {previous_mode} → {mode_label()} mode.")
     return True
 
 
@@ -498,7 +498,7 @@ def on_user_stats_update(account_id, stats):
             if new_available_capital > 0 and new_portfolio_value > 0:
                 available_capital = new_available_capital
                 portfolio_value = new_portfolio_value
-                # send_message(f"💰 Received user stats for account {account_id}: \n\n Available Capital=${available_capital},\n Portfolio Value=${portfolio_value}")
+                send_message(f"💰 Received user stats for account {account_id}: \n\n Available Capital=${available_capital},\n Portfolio Value=${portfolio_value}")
                 logger.info(f"💰 Received user stats for account {account_id}: Available Capital=${available_capital}, Portfolio Value=${portfolio_value}")
                 account_state_received.set()
             else:
@@ -566,7 +566,7 @@ def on_account_all_update(account_id, data):
                 for trade in reversed(all_new_trades):
                      if trade not in recent_trades:
                         recent_trades.append(trade)
-                        # send_message(f"💱 New Trade: Market {trade.get('market_id')},\n Type {trade.get('type')},\n Size {trade.get('size')},\n Price {trade.get('price')}")
+                        send_message(f"💱 New Trade: Market {trade.get('market_id')},\n Type {trade.get('type')},\n Size {trade.get('size')},\n Price {trade.get('price')}")
                         logger.info(f"💱 WebSocket trade update: Market {trade.get('market_id')}, Type {trade.get('type')}, Size {trade.get('size')}, Price {trade.get('price')}")
 
             if not account_all_received.is_set():
